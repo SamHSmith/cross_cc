@@ -19,6 +19,8 @@ Preserve their original notices when packaging or redistributing:
 - glibc: lib/libc/glibc/LICENSES and source-file notices.
 - mingw-w64 and other target resources: the notices in their source trees.
 
-Normal setup, builds and compilation neither download nor invoke Zig. The Zig
-executable fetched by `setup --reference` is solely a differential-testing
+Source setup downloads a SHA-256-verified Zig source archive for the headers
+and runtime sources; it does not invoke Zig. Normal compilation uses the bundled
+sources without downloads (apart from consented Microsoft SDK acquisition).
+The Zig executable fetched by `setup --reference` is solely a differential-testing
 reference, not a compiler dependency.

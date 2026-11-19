@@ -20,7 +20,7 @@ NATIVE_DIR ?= .cache/native
 NATIVE_FLAGS = $(NATIVE_DIR)/linker-flags.txt
 NATIVE_ARG = --native-dir=$(NATIVE_DIR)
 
-.PHONY: all setup native build test package release tools check-tools clean help
+.PHONY: all setup resources native build test package release tools check-tools clean help
 
 all: build
 
@@ -36,22 +36,25 @@ $(TOOLDIR)/release: tools/windows_path/windows_path.c
 setup: $(BUILD)
 	$(BUILD) setup $(JOBS_ARG) --llvm=$(LLVM) $(NATIVE_ARG) $(if $(REFERENCE),--reference)
 
+resources: $(BUILD)
+	$(BUILD) resources
+
 native: $(BUILD)
 	$(BUILD) native $(JOBS_ARG) --llvm=$(LLVM) $(NATIVE_ARG)
 
 $(NATIVE_FLAGS): $(BUILD)
 	$(BUILD) native $(JOBS_ARG) --llvm=$(LLVM) $(NATIVE_ARG)
 
-build: $(BUILD) $(NATIVE_FLAGS)
+build: resources $(BUILD) $(NATIVE_FLAGS)
 	$(BUILD) build $(JOBS_ARG) $(NATIVE_ARG)
 
-test: $(BUILD)
+test: resources $(BUILD)
 	$(BUILD) test $(JOBS_ARG)
 
-package: $(BUILD)
+package: resources $(BUILD)
 	$(BUILD) package $(ARGS)
 
-release: $(TOOLDIR)/release $(BUILD)
+release: resources $(TOOLDIR)/release $(BUILD)
 	$(TOOLDIR)/release $(ARGS)
 
 # Unit tests for the Windows path helpers only (no network, no LLVM needed).

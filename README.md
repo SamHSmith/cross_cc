@@ -37,6 +37,14 @@ make test
 
 See `tools/build.c` and `tools/release.c` (`--help`) for options and releases.
 Dependencies and compatibility inputs are pinned in the root `*.lock.json` files.
+The bulk headers and runtime sources are not stored in Git. `make` prepares them
+under `lib/` from the SHA-256-pinned source archive; `make resources` does only
+that step. A cold source build needs network access or a preseeded
+`.cache/downloads/zig-0.17.1.tar.xz`. Once prepared, resources are reused offline;
+`make resources` also reconstructs them offline from the verified cached archive.
+Release bundles still contain the complete resource tree: ordinary compilation
+does not download these sources. See [lib/README.md](lib/README.md) for cache
+recovery and refresh instructions.
 
 ## Reproducibility and limits
 

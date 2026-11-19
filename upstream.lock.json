@@ -1,6 +1,15 @@
 {
   "project": "cross_cc",
   "implementation_language": "C",
+  "resources": {
+    "repository": "https://codeberg.org/ziglang/zig.git",
+    "version": "0.17.1",
+    "commit": "be248cc1fdc3cc654f9ec8ba68514bcb93b204fe",
+    "url": "https://ziglang.org/download/0.17.1/zig-0.17.1.tar.xz",
+    "sha256": "1e89bf06610b769a8c77676c6c8d54b093a0db60f4891f2f91014829012f0e24",
+    "strip_prefix": "zig-0.17.1/lib",
+    "extract": ["include", "libc", "libcxx", "libcxxabi", "libunwind", "libtsan"]
+  },
   "reference_binary": {
     "purpose": "tests only (setup --reference); never a backend",
     "target": "x86_64-linux",

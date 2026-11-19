@@ -11,8 +11,10 @@ static const char USAGE[] =
     "       (bootstrap: `make tools`, or cc -O1 -o build/tools/build tools/build.c)\n"
     "\n"
     "commands:\n"
-    "  setup   download + SHA-256 verify the compiler-rt and libbacktrace sources, then\n"
-    "          extract to .cache/upstream; --llvm=pinned also prepares the native backend.\n"
+    "  resources download + SHA-256 verify the pinned source archive and populate lib/.\n"
+    "          Reuses extracted resources or verified .cache/downloads offline.\n"
+    "  setup   prepare resources, compiler-rt and libbacktrace sources;\n"
+    "          --llvm=pinned also prepares the native backend.\n"
     "  build   compile the root main.c to bin/cross_cc and copy it to the argv0 aliases (cross_c++, cross_clang,\n"
     "          ld.lld, ld64.lld, lld-link, wasm-ld, llvm-ar, llvm-ranlib); links the static backend\n"
     "          flags written by native (argv0 mode). No network; fails if native has not been run.\n"
@@ -62,8 +64,8 @@ static const char USAGE[] =
     "               else setup builds the pinned libxml2 into .cache/native)\n"
     "\n"
     "All temp/cache/build output stays under .cache/ and build/ (TMPDIR=.cache/tmp).\n"
-    "Pins: upstream.lock.json (test reference binary, libbacktrace), toolchain.lock.json\n"
-    "(LLVM). Headers and runtime sources are checked in under lib/.\n";
+    "Pins: upstream.lock.json (lib/ sources, test reference binary, libbacktrace),\n"
+    "toolchain.lock.json (LLVM). Generated lib/ resources are not tracked in Git.\n";
 
 typedef struct {
     char *root;
@@ -167,7 +169,92 @@ static void report_llvm(const Opts *o, const char *want) {
     else fprintf(stderr, "warning: LLVM version mismatch: using [%s], pinned clang is %s (patch-level difference; --llvm=pinned fetches %s)\n", line, want, want);
 }
 
+/* Only setup/resources acquires source dependencies. Build/package stay offline.
+ * The receipt binds the extracted cache to both the archive and selection recipe.
+ * Never replace an unrecognized lib/ tree (it might contain local patches). */
+static const char *const RESOURCE_DIRS[] = {"include", "libc", "libcxx", "libcxxabi", "libunwind", "libtsan", NULL};
+
+static char *resource_identity(const Opts *o) {
+    Json *pin = jobj(json_load(PJ(o->root, "upstream.lock.json")), "resources");
+    Json *dirs = jarr_opt(pin, "extract");
+    if (!dirs) fail("resources.extract is missing");
+    Buf id = {0};
+    buf_addf(&id, "cross_cc-resources-v1\n%s\n%s\n", jstr(pin, "sha256"), jstr(pin, "strip_prefix"));
+    int n = 0;
+    for (; RESOURCE_DIRS[n]; n++) {
+        if (n >= dirs->n || dirs->items[n]->type != J_STR || strcmp(dirs->items[n]->str, RESOURCE_DIRS[n]))
+            fail("resources.extract must list the six supported lib/ directories in order");
+        buf_addf(&id, "%s\n", RESOURCE_DIRS[n]);
+    }
+    if (dirs->n != n) fail("resources.extract has unsupported directories");
+    return xstrdup(buf_cstr(&id));
+}
+
+static int resources_ready(const Opts *o, const char *identity) {
+    char *receipt = PJ(o->root, "lib", ".resources-receipt");
+    if (!is_file(receipt) || strcmp(read_file(receipt, NULL), identity)) return 0;
+    for (int i = 0; RESOURCE_DIRS[i]; i++)
+        if (!is_dir(PJ(o->root, "lib", RESOURCE_DIRS[i]))) return 0;
+    return 1;
+}
+
+static void require_resources(const Opts *o) {
+    if (!resources_ready(o, resource_identity(o)))
+        fail("lib/ resources missing or stale; run `make resources` (or the build tool's resources command)");
+}
+
+static void resources(const Opts *o) {
+    char *identity = resource_identity(o);
+    if (resources_ready(o, identity)) {
+        printf("lib/ resources ready (cached; no network)\n");
+        return;
+    }
+    char *receipt = PJ(o->root, "lib", ".resources-receipt");
+    int recognized = is_file(receipt) && !strcmp(read_file(receipt, NULL), identity);
+    for (int i = 0; RESOURCE_DIRS[i]; i++) {
+        char *dir = PJ(o->root, "lib", RESOURCE_DIRS[i]);
+        if (exists(dir) && !recognized)
+            fail("unrecognized or stale resources at %s; move the six generated lib/ directories and .resources-receipt aside, then rerun resources", dir);
+    }
+    Json *pin = jobj(json_load(PJ(o->root, "upstream.lock.json")), "resources");
+    const char *url = jstr(pin, "url");
+    char *archive = PJ(o->root, ".cache", "downloads", last_segment(url));
+    char *stage = PJ(o->root, ".cache", "resources-stage");
+    mkdirs(PJ(o->root, ".cache", "tmp"));
+    /* Exclusive ownership covers download .part, extraction and publication. */
+#ifdef _WIN32
+    int claimed = _mkdir(stage) == 0;
+#else
+    int claimed = mkdir(stage, 0777) == 0;
+#endif
+    if (!claimed) fail("resource stage %s exists or cannot be claimed (active/interrupted run); move it aside only after that run stops", stage);
+    fetch(url, jstr(pin, "sha256"), archive);
+    Strs cmd = {0};
+    strs_add(&cmd, "tar");
+    strs_add(&cmd, "-xJf");
+    strs_add(&cmd, archive);
+    strs_add(&cmd, "-C");
+    strs_add(&cmd, stage);
+    strs_add(&cmd, "--strip-components=2");
+    for (int i = 0; RESOURCE_DIRS[i]; i++)
+        strs_addf(&cmd, "%s/%s", jstr(pin, "strip_prefix"), RESOURCE_DIRS[i]);
+    must(o, o->root, &cmd);
+    for (int i = 0; RESOURCE_DIRS[i]; i++)
+        if (!is_dir(PJ(stage, RESOURCE_DIRS[i]))) fail("resource archive lacks %s", RESOURCE_DIRS[i]);
+    mkdirs(PJ(o->root, "lib"));
+    for (int i = 0; RESOURCE_DIRS[i]; i++) {
+        char *dst = PJ(o->root, "lib", RESOURCE_DIRS[i]);
+        if (!exists(dst)) rename_path(PJ(stage, RESOURCE_DIRS[i]), dst);
+    }
+    char *part = sfmt("%s.part", receipt);
+    write_file(part, identity);
+    rename_path(part, receipt);
+    remove_all(stage);
+    printf("lib/ resources ready (SHA-256 verified source archive)\n");
+}
+
 static void setup(Opts *o) {
+    resources(o);
     char *dl = PJ(o->root, ".cache", "downloads");
     mkdirs(dl);
     mkdirs(PJ(o->root, ".cache", "tmp"));
@@ -232,7 +319,7 @@ static char *cc_bin(void) {
 /* Compile the root C package. main.c is the unity translation unit; the backend
  * archive and the LLVM libraries come from linker-flags.txt. */
 static void build(Opts *o) {
-    if (!is_dir(PJ(o->root, "lib", "libc"))) fail("checked-in lib/ headers and runtime sources missing");
+    require_resources(o);
     mkdirs(PJ(o->root, ".cache", "tmp"));
     mkdirs(PJ(o->root, "build"));
     mkdirs(PJ(o->root, "bin"));
@@ -351,6 +438,7 @@ static int dir_nonempty(const char *p) {
 /* package_dist assembles a self-contained tree: the compiler finds lib/ and
  * upstream.lock.json next to the executable, never the development checkout. */
 static void package_dist(Opts *o) {
+    require_resources(o);
     const char *target = o->target ? o->target : host_key();
     const char *suffix = "";
     if (!strcmp(target, "windows-amd64") || !strcmp(target, "windows-arm64")) suffix = ".exe";
@@ -362,7 +450,6 @@ static void package_dist(Opts *o) {
     Json *bt = jobj(json_load(PJ(o->root, "upstream.lock.json")), "libbacktrace");
     char *btsrc = PJ(up, sfmt("libbacktrace-%s", jstr(bt, "commit")));
     if (!exists(PJ(btsrc, "backtrace.c"))) fail("libbacktrace sources missing at %s: run `setup`", btsrc);
-    if (!is_dir(PJ(libsrc, "libc"))) fail("checked-in lib/ missing at %s", libsrc);
     if (!exists(PJ(crtsrc, "lib", "builtins", "CMakeLists.txt"))) fail("compiler-rt sources missing at %s: run `setup`", crtsrc);
     char *bin = o->binary;
     if (!bin) {
@@ -1219,6 +1306,7 @@ int main(int argc, char **argv) {
     }
     const char *cmd = argv[1];
     if (!strcmp(cmd, "setup")) setup(&o);
+    else if (!strcmp(cmd, "resources")) resources(&o);
     else if (!strcmp(cmd, "build")) build(&o);
     else if (!strcmp(cmd, "native")) native(&o);
     else if (!strcmp(cmd, "test")) test(&o);

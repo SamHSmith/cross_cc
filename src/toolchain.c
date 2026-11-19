@@ -96,8 +96,14 @@ Toolchain discover_toolchain(Options o, Target t)
         tc.lib_dir = env("CROSS_CC_LIB_DIR");
     if (!*nz(tc.lib_dir))
         tc.lib_dir = env("ZIG_LIB_DIR");
-    if (!*nz(tc.lib_dir))
+    if (!*nz(tc.lib_dir)) {
         tc.lib_dir = first_existing(path_join(tc.root, "lib"));
+        const char *dirs[] = {"include", "libc", "libcxx", "libcxxabi", "libunwind", "libtsan"};
+        for (size_t i = 0; i < sizeof dirs / sizeof dirs[0]; i++)
+            if (!is_dir(path_join(tc.lib_dir, dirs[i])))
+                fatal("pinned lib/ resources missing; run `make resources` in the source checkout "
+                      "or restore the complete release bundle (or set CROSS_CC_LIB_DIR)");
+    }
     if (!*tc.lib_dir || !is_dir(tc.lib_dir))
         fatal("pinned headers and runtime sources not found; run the setup tool or set "
               "CROSS_CC_LIB_DIR");

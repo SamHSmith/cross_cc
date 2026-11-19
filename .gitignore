@@ -7,3 +7,13 @@
 *.o
 *.obj
 *.exe
+
+# SHA-256-pinned resources populated by `make resources` / setup.
+/lib/include/
+/lib/libc/
+/lib/libcxx/
+/lib/libcxxabi/
+/lib/libunwind/
+/lib/libtsan/
+/lib/.resources-receipt
+/lib/.resources-receipt.part
