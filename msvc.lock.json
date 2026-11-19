@@ -1,0 +1,55 @@
+{
+  "schema": 1,
+  "resource_version": "vs17.14.37906.3-crt14.44.17.14-sdk10.0.26100-v1",
+  "crt_version": "14.44.17.14",
+  "sdk_version": "10.0.26100",
+  "sdk_package_version": "10.0.26100.9457",
+  "license_version": "build-tools-march-2024+WIN10SDK.RTM.AUG_2018_en-US",
+  "license_urls": [
+    "https://visualstudio.microsoft.com/wp-content/uploads/2024/03/Visual-Studio-2022-Diagnostic-Build-Tools-Agent-License_Update-March-2024_EN.docx",
+    "https://aka.ms/WinSDKLicenseURL"
+  ],
+  "license_hashes": {
+    "build_tools_docx_sha256": "2f66b86a00e8d9833789897ce23d05a4a2dbea370cf39c8c1098dbc17d0e7bdc",
+    "sdk_installer_rtf_sha256": "0f4a26ac9dc50066f8a1bfeaaf3f092d1b9e4791df5487b9f3c31e7c3dc4d7f5"
+  },
+  "manifest": {
+    "channelItems": [{
+      "id": "Microsoft.VisualStudio.Manifests.VisualStudio",
+      "version": "17.14.37906.3",
+      "type": "Manifest",
+      "payloads": [{
+        "fileName": "VisualStudio.vsman",
+        "sha256": "da49c304df0fff4e75c20849171840a06840e845ce814104d709dfb5cd461668",
+        "size": 30447538,
+        "url": "https://download.visualstudio.microsoft.com/download/pr/95995f57-8355-4ff5-8d90-a7e1669fb3b3/da49c304df0fff4e75c20849171840a06840e845ce814104d709dfb5cd461668/VisualStudio.vsman"
+      }]
+    }]
+  },
+  "helper_version": "xwin-0.10.0",
+  "hosts": {
+    "linux-amd64": {
+      "url": "https://github.com/Jake-Shadle/xwin/releases/download/0.10.0/xwin-0.10.0-x86_64-unknown-linux-musl.tar.gz",
+      "sha256": "d870eb4b2f390878af6da1ccd3cf321d22fcb72720984853b4be732ae597fc88",
+      "member": "xwin-0.10.0-x86_64-unknown-linux-musl/xwin"
+    },
+    "windows-amd64": {
+      "url": "",
+      "sha256": "",
+      "member": "xwin.exe",
+      "binary_sha256": "aebd6d7c5724a0f7e1d687a7d69c1a04d654eafc3f4829f844a44502fde247a0"
+    },
+    "darwin-arm64": {
+      "url": "",
+      "sha256": "bede9a47eb9d801ef267bb4f6f6348a200132785da7a2684daeac45ba8a34957",
+      "member": "xwin/0.10.0/bin/xwin",
+      "binary_sha256": "605ee9a0c1476148d143610b9832f8cb8dc1ceca6ec470fe746ae94829cae7af"
+    },
+    "darwin-amd64": {
+      "url": "",
+      "sha256": "11f292e964bbe84479c92792428b56bf8c2ec6be893f9fdc5fccadadbeeade43",
+      "member": "xwin/0.10.0/bin/xwin",
+      "binary_sha256": "a69d4c0a6492d910099fbf1627b6254fc0d3d6baca5534e96ca5873593d66df7"
+    }
+  }
+}

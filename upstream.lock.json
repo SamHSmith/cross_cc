@@ -1,0 +1,20 @@
+{
+  "project": "cross_cc",
+  "implementation_language": "C",
+  "reference_binary": {
+    "purpose": "tests only (setup --reference); never a backend",
+    "target": "x86_64-linux",
+    "directory": "zig-x86_64-linux-0.17.1",
+    "url": "https://ziglang.org/download/0.17.1/zig-x86_64-linux-0.17.1.tar.xz",
+    "sha256": "3581863e3cbcfd0fce0efc682ce7e9e93da96668a977791d356a26d2a7e9b17a",
+    "size": 57411036
+  },
+  "libbacktrace": {
+    "repository": "https://github.com/ianlancetaylor/libbacktrace",
+    "commit": "0b9b49cf4a2c9229fc052d6716e1528b2f23e91a",
+    "url": "https://codeload.github.com/ianlancetaylor/libbacktrace/tar.gz/0b9b49cf4a2c9229fc052d6716e1528b2f23e91a",
+    "sha256": "fabcb6868b3d09734d4c537637dacac0bf8c9aa28e07486de5c6ce2eb749d413",
+    "license": "BSD-3-Clause",
+    "license_file": "licenses/libbacktrace/LICENSE"
+  }
+}

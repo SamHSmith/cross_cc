@@ -1,0 +1,16 @@
+{
+  "repository": "https://github.com/WebAssembly/wasi-libc",
+  "commit": "1dfe5c302d1c5ab621f7abf04620fae92700fd22",
+  "tag": "wasi-sdk-20",
+  "source_url_prefix": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/1dfe5c302d1c5ab621f7abf04620fae92700fd22/",
+  "license": "dlmalloc is public domain (CC0); wasi-libc changes Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; see LICENSE",
+  "files": {
+    "dlmalloc/src/dlmalloc.c": "f1f2d23b9c4a5fc611573e4c23b62ce8f7deb76e800d3d846d865d443722e00f",
+    "dlmalloc/src/malloc.c": "b58577ae0d758c4c7388039c393ebb670a0900374bb90a78b28f13c6a27ca41e",
+    "dlmalloc/include/unistd.h": "4e3acd4163e7d99e593c935f8fc9baa91d3016698dd4cd5fdfc50f248efcb5bc",
+    "LICENSE": "673f577e363e80e0058bd78214683f045d1d0c63930969a87f01a1d87d7cf1d6",
+    "LICENSE-APACHE": "a60eea817514531668d7e00765731449fe14d059d3249e0bc93b36de45f759f2",
+    "LICENSE-MIT": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3",
+    "LICENSE-APACHE-LLVM": "268872b9816f90fd8e85db5a28d33f8150ebb8dd016653fb39ef1f94f2686bc5"
+  }
+}

@@ -1,0 +1,9 @@
+/.cache/
+/build/
+/bin/
+/dist/
+/cross_cc
+/cross_cc.pdb
+*.o
+*.obj
+*.exe

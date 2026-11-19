@@ -1,0 +1,2 @@
+# Keep embedded sources and release inputs identical on every checkout host.
+* text=auto eol=lf

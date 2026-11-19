@@ -1,0 +1,10 @@
+{
+  "name": "musl",
+  "version": "1.2.5",
+  "url": "https://musl.libc.org/releases/musl-1.2.5.tar.gz",
+  "sha256": "a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4",
+  "purpose": "Restore libc functions removed from Zig's musl tree and reimplemented in lib/c/*.zig or compiler_rt/*.zig, without invoking Zig.",
+  "selection": "Files in upstream src/, arch/, include/ absent at the same relative path in pinned Zig lib/libc/musl, plus full original include/, src/include/ and src/internal/ to restore declarations removed by Zig. Original contents and COPYRIGHT copied to vendor/musl. malloc/oldmalloc sources are not compiled.",
+  "validation": "src/stdio/vfprintf.c, src/internal/libc.h and src/thread/pthread_create.c compare byte-identical with pinned Zig's vendored source.",
+  "copied_files_sha256_manifest_digest": "dc6ea3336df6b1f546f8b4eebab8a793408078955f2c67d7bff13df01426b81d"
+}

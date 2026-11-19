@@ -1,0 +1,6 @@
+# Bridge compile flags for the darwin-amd64 release (tools/release.c --bridge-args).
+# tools/release.c adds the x86_64-apple-macosx11.0.0 triple. {sdk} is the macOS SDK
+# (the same SDK passed to tools/macos-x64-llvm.c as SDKROOT); its libc++ headers match the ones the LLVM SDK from
+# tools/macos-x64-llvm.c was compiled with.
+-isysroot
+{sdk}

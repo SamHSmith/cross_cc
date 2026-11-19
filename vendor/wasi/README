@@ -1,0 +1,3 @@
+close.c: WebAssembly/wasi-libc tag wasi-sdk-20, libc-bottom-half/cloudlibc/src/libc/unistd/close.c
+(Copyright (c) 2015-2016 Nuxi, BSD-2-Clause; see LICENSE-cloudlibc). Zig 0.17.1 implements close() for
+WASI in Zig (lib/c/unistd.zig); this is the equivalent upstream C source.

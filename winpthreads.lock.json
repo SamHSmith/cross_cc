@@ -1,0 +1,17 @@
+{
+  "upstream": {
+    "project": "mingw-w64",
+    "repository": "https://github.com/mingw-w64/mingw-w64",
+    "version": "v13.0.0",
+    "commit": "de62c283f3383bd825c98518cb0a42ba071d4ac2",
+    "license": "MIT"
+  },
+  "files": [
+    {
+      "path": "deps/winpthreads/spinlock.c",
+      "url": "https://raw.githubusercontent.com/mingw-w64/mingw-w64/de62c283f3383bd825c98518cb0a42ba071d4ac2/mingw-w64-libraries/winpthreads/src/spinlock.c",
+      "sha256": "56cf16ed0d2a683333b84c31fd382c2bc9311e11d9fc0914dcd90168a32a0d6d",
+      "license_notice": "Included verbatim in the source file header."
+    }
+  ]
+}

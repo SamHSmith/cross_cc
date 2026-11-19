@@ -1,0 +1,24 @@
+cross_cc's implementation is MIT licensed; see LICENSE.
+
+Compatibility baseline: Zig 0.17.1, commit
+be248cc1fdc3cc654f9ec8ba68514bcb93b204fe.
+Upstream: https://codeberg.org/ziglang/zig
+The target logic and runtime build recipes are derived from Zig's MIT-licensed
+implementation. Copyright (c) Zig contributors; the permission notice is
+preserved in LICENSE. Per-file comments identify translated recipes.
+deps/llvm-bridge/ (Zig C++ bridge sources) and lib/ (headers and runtime
+sources, see lib/README.md) are copied from the Zig 0.17.1 source release;
+Zig's MIT license is in deps/llvm-bridge/LICENSE.
+
+Downloaded and checked-in dependencies are not relicensed by this project.
+Preserve their original notices when packaging or redistributing:
+- LLVM, Clang, LLD, libc++, libc++abi and libunwind: their respective upstream
+  license files (generally Apache-2.0 WITH LLVM-exception; additional notices
+  may apply to individual files).
+- musl: lib/libc/musl/COPYRIGHT.
+- glibc: lib/libc/glibc/LICENSES and source-file notices.
+- mingw-w64 and other target resources: the notices in their source trees.
+
+Normal setup, builds and compilation neither download nor invoke Zig. The Zig
+executable fetched by `setup --reference` is solely a differential-testing
+reference, not a compiler dependency.
