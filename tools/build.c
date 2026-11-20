@@ -26,8 +26,8 @@ static const char USAGE[] =
     "  native       legacy: backend archive with a system C++ compiler (CXX); not used by build\n"
     "  help         this text\n"
     "\n"
-    "options: --compiler=FILE --profile=debug|release --jobs=N --deps-prefix=DIR (existing\n"
-    "  linux-release-deps prefix, verified not rebuilt) --reference --native-dir=DIR (native)\n"
+    "options: --compiler=FILE --profile=debug|release --jobs=N --deps-prefix=DIR (exact\n"
+    "  linux-release-deps prefix; default .cache/support/linux-amd64-<key>) --reference --native-dir=DIR (native)\n"
     "environment: LLVM_PREFIX (LLVM 22.1.8 static SDK instead of the pinned archive),\n"
     "  CROSS_CC_SEED_ROOT (seed resources; else found above the seed binary)\n"
     "\n"
@@ -51,7 +51,7 @@ typedef struct {
     char *compiler;    /* --compiler: absolute selected seed cross_cc */
     char *seed_root;   /* its packaged resources (require_seed) */
     char *profile;     /* --profile=debug|release, forwarded to the release pipeline */
-    char *deps_prefix; /* --deps-prefix: existing linux-release-deps prefix (verified, not rebuilt) */
+    char *deps_prefix; /* --deps-prefix: exact linux-release-deps prefix (helper verifies its receipt) */
     char *self_dir;    /* directory of this executable: sibling release/deps helpers */
     Strs forward;      /* release: options forwarded verbatim to the release tool */
 } Opts;
@@ -329,6 +329,7 @@ static void seed_must(const Opts *o, const char *cwd, Strs *cmd) {
 }
 
 static void prepare(Opts *o);
+static char *linux_deps_prefix(const Opts *o);
 static void build(Opts *o);
 
 /* Compile one standalone C test program and run it from the checkout root. */
@@ -391,7 +392,7 @@ static void test(Opts *o) {
     printf("test: %d unit programs passed\n", units);
     /* Seeded support-SDK check: only once prepare has built the default prefix. */
     char *sd_src = PJ(tests, "support_deps_check.c");
-    char *sd_prefix = PJ(o->root, ".cache", "linux-release-deps");
+    char *sd_prefix = linux_deps_prefix(o);
     if (is_file(sd_src) && !strcmp(host_key(), "linux-amd64") && is_file(PJ(sd_prefix, "complete.sha256"))) {
         char *exe = PJ(o->root, "build", "tests", "support_deps_check");
         Strs cc = {0};
@@ -1434,21 +1435,44 @@ static void write_lines(const char *path, const Strs *a) {
 
 /* Pinned GNU-ABI support SDK: zlib/zstd/libxml2 built by the seed plus the
  * libstdc++-12/libgcc archives and headers (tools/linux-release-deps.c). */
-static char *prepare_linux_deps(const Opts *o) {
-    char *prefix;
-    if (o->deps_prefix) {
-        prefix = abs_path(o->deps_prefix);
-    } else {
-        prefix = PJ(o->root, ".cache", "linux-release-deps");
-        char *helper = PJ(o->self_dir, sfmt("linux-release-deps%s", EXE_SUFFIX));
-        if (!is_file(helper)) fail("%s missing: the launcher compiles it beside this tool (or pass --deps-prefix=DIR)", helper);
-        Strs cmd = {0};
-        strs_add(&cmd, helper);
-        strs_addf(&cmd, "--compiler=%s", o->compiler);
-        strs_addf(&cmd, "--prefix=%s", prefix);
-        strs_addf(&cmd, "--jobs=%d", o->jobs);
-        seed_must(o, o->root, &cmd);
+/* The support prefix: --deps-prefix exactly, else keyed by everything its
+ * helper receipt binds, so another seed or helper never meets a stale prefix. */
+static char *linux_deps_prefix(const Opts *o) {
+    if (o->deps_prefix) return abs_path(o->deps_prefix);
+    Buf k = {0};
+    buf_addf(&k, "seed %s\n", sha256_file(o->compiler));
+    static const char *const ins[] = {"toolchain.lock.json", "tools/linux-release-deps.c", "tools/support_deps.h", "tools/common.h", NULL};
+    for (int i = 0; ins[i]; i++) {
+        char *p = PJ(o->root, ins[i]);
+        buf_addf(&k, "%s %s\n", ins[i], is_file(p) ? sha256_file(p) : "-");
     }
+    const char *text = buf_cstr(&k);
+    char *hex = sha256_bytes(text, strlen(text));
+    hex[16] = 0;
+    return PJ(o->root, ".cache", "support", sfmt("linux-amd64-%s", hex));
+}
+
+static char *prepare_linux_deps(const Opts *o) {
+    char *prefix = linux_deps_prefix(o);
+    char *helper = PJ(o->self_dir, sfmt("linux-release-deps%s", EXE_SUFFIX));
+    if (!is_file(helper)) fail("%s missing: the launcher compiles it beside this tool", helper);
+    /* Reuse already verified archives (the helper re-checks every SHA-256). */
+    char *dl = PJ(prefix, "downloads");
+    char *old = PJ(o->root, ".cache", "linux-release-deps", "downloads");
+    Strs names = {0};
+    if (!o->deps_prefix && !exists(dl) && list_dir(old, &names)) {
+        mkdirs(dl);
+        for (int i = 0; i < names.n; i++) {
+            char *src = PJ(old, names.v[i]);
+            if (is_file(src) && !ends_with(names.v[i], ".part")) link_or_copy(PJ(dl, names.v[i]), src);
+        }
+    }
+    Strs cmd = {0};
+    strs_add(&cmd, helper);
+    strs_addf(&cmd, "--compiler=%s", o->compiler);
+    strs_addf(&cmd, "--prefix=%s", prefix);
+    strs_addf(&cmd, "--jobs=%d", o->jobs);
+    seed_must(o, o->root, &cmd);
     check_host_sdk(prefix);
     printf("host support SDK ready: %s\n", prefix);
     return prefix;
