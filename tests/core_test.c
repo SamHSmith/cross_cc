@@ -147,7 +147,22 @@ static size_t assertions;
             exit(1);                                                                               \
         }                                                                                          \
     } while (0)
-#define EQ(a, b) CHECK(streq((a), (b)))
+#define EQ(a, b)                                                                                   \
+    do                                                                                             \
+    {                                                                                              \
+        const char *eq_a = (a), *eq_b = (b);                                                       \
+        if (!streq(eq_a, eq_b))                                                                    \
+        {                                                                                          \
+            fprintf(stderr, "%s:%d: expected [", __FILE__, __LINE__);                              \
+            for (const char *c = eq_b; *c; c++)                                                    \
+                fprintf(stderr, "\\x%02x", (unsigned char)*c);                                     \
+            fprintf(stderr, "] actual [");                                                         \
+            for (const char *c = eq_a; *c; c++)                                                    \
+                fprintf(stderr, "\\x%02x", (unsigned char)*c);                                     \
+            fprintf(stderr, "]\n");                                                                \
+        }                                                                                          \
+        CHECK(streq(eq_a, eq_b));                                                                  \
+    } while (0)
 static Options parse(StrVec args)
 {
     char *error = NULL;
@@ -539,6 +554,11 @@ int main(int argc, char **argv)
 {
     if (argc > 2 && streq(argv[1], "--capture-child"))
     {
+#ifdef _WIN32
+        /* capture_command reads raw bytes; keep CRT text mode from turning "\n" into "\r\n". */
+        _setmode(_fileno(stdout), _O_BINARY);
+        _setmode(_fileno(stderr), _O_BINARY);
+#endif
         fputs(" stdout \n", stdout);
         fputs("stderr\n", stderr);
         return atoi(argv[2]);
