@@ -2,6 +2,12 @@
   "repository": "https://github.com/WebAssembly/wasi-libc",
   "commit": "1dfe5c302d1c5ab621f7abf04620fae92700fd22",
   "tag": "wasi-sdk-20",
+  "url": "https://codeload.github.com/WebAssembly/wasi-libc/tar.gz/1dfe5c302d1c5ab621f7abf04620fae92700fd22",
+  "sha256": "1bf642d35f8876a256824db01a43436c0b83ce4a0865578d03c37b16937a9b06",
+  "archive": "wasi-libc-1dfe5c302d1c5ab621f7abf04620fae92700fd22.tar.gz",
+  "strip_prefix": "wasi-libc-1dfe5c302d1c5ab621f7abf04620fae92700fd22",
+  "files_manifest": "tools/resources/wasi.files",
+  "files_manifest_sha256": "d62dc9e4703f6374420f512cdab8041adbe7bb9712e82195b5d320a992722ced",
   "source_url_prefix": "https://raw.githubusercontent.com/WebAssembly/wasi-libc/1dfe5c302d1c5ab621f7abf04620fae92700fd22/",
   "license": "dlmalloc is public domain (CC0); wasi-libc changes Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT; see LICENSE",
   "files": {

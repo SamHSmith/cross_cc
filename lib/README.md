@@ -33,5 +33,19 @@ All build/download scratch stays under the checkout, not `/tmp`.
 
 To refresh the compatibility baseline, update the resource pin and this file,
 regenerate the directories, and verify the runtime recipes and package tests.
-The small supplemental sources in `vendor/` and our modified LLVM bridge remain
-tracked separately; they are not interchangeable with these archive directories.
+The curated musl/WASI supplements are reconstructed separately at their existing
+`vendor/` paths by the same command. `musl.lock.json` and
+`vendor/wasi/dlmalloc.lock.json` pin their archives; `tools/resources/*.files`
+select the exact files and pin each SHA-256. Their generated paths are ignored,
+while our WASI `uname.c`/`valloc.c`, notices and the modified LLVM bridge remain
+tracked. Release bundles include all reconstructed sources.
+
+Supplement caches recheck every selected file and reject extra files, symlinks,
+modified contents and stale pins. For a deliberate refresh or repair, preserve
+local edits and move `vendor/musl/` (musl) or the three generated WASI directories
+(`dlmalloc/`, `libc-bottom-half/`, `libc-top-half/`) aside with the matching
+`vendor/.resources-<musl|wasi>-receipt`, then rerun `./build.sh resources`.
+Keep the tracked WASI shims, lock and notices in place. Cached archives allow
+offline reconstruction; a failed run retains `.cache/supplements-<name>-stage`
+for inspection. After confirming no acquisition is active, move that stage aside
+before retrying.

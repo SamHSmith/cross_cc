@@ -163,12 +163,12 @@ static int resources_ready(const Opts *o, const char *identity) {
     return 1;
 }
 
-static void require_resources(const Opts *o) {
+static void require_lib_resources(const Opts *o) {
     if (!resources_ready(o, resource_identity(o)))
         fail("lib/ resources missing or stale; run ./build.sh resources (build.cmd on Windows)");
 }
 
-static void resources(const Opts *o) {
+static void lib_resources(const Opts *o) {
     char *identity = resource_identity(o);
     if (resources_ready(o, identity)) {
         printf("lib/ resources ready (cached; no network)\n");
@@ -216,6 +216,18 @@ static void resources(const Opts *o) {
     rename_path(part, receipt);
     remove_all(stage);
     printf("lib/ resources ready (SHA-256 verified source archive)\n");
+}
+
+#include "supplements.h"
+
+static void require_resources(const Opts *o) {
+    require_lib_resources(o);
+    require_supplements(o);
+}
+
+static void resources(const Opts *o) {
+    lib_resources(o);
+    supplements(o);
 }
 
 static void setup(Opts *o) {

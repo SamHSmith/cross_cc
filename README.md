@@ -90,8 +90,9 @@ source-build utility has its own CMake/Ninja prerequisites; ordinary builds use
 a prepared, matching static LLVM SDK.
 
 Dependencies and compatibility inputs are pinned in the root `*.lock.json` files.
-Bulk headers/runtime sources are reconstructed under ignored `lib/` directories;
-`./build.sh resources` does only that step. Cold builds need the pinned archives
+Bulk headers/runtime sources and curated musl/WASI supplements are reconstructed
+under ignored `lib/` and `vendor/` paths. `./build.sh resources` prepares them
+from pinned archives and selection manifests. Cold builds need the pinned archives
 from the network or a preseeded cache, including LLVM development libraries and
 support inputs—not just the compiler ZIP. Completed caches can be reused offline.
 All scratch stays under the checkout, not `/tmp`. Release bundles still include

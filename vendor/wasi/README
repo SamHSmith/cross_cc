@@ -1,3 +1,9 @@
-close.c: WebAssembly/wasi-libc tag wasi-sdk-20, libc-bottom-half/cloudlibc/src/libc/unistd/close.c
-(Copyright (c) 2015-2016 Nuxi, BSD-2-Clause; see LICENSE-cloudlibc). Zig 0.17.1 implements close() for
-WASI in Zig (lib/c/unistd.zig); this is the equivalent upstream C source.
+./build.sh resources reconstructs the dlmalloc/, libc-bottom-half/ and
+libc-top-half/ directories from the wasi-sdk-20 commit pinned in dlmalloc.lock.json.
+The archive and every selected file are SHA-256 checked against that lock and
+tools/resources/wasi.files. The directories are generated, not tracked; releases
+still bundle them. uname.c and valloc.c are local compatibility code and stay tracked.
+
+close.c is the upstream C replacement for a function Zig 0.17.1 implements in
+lib/c/unistd.zig (Nuxi BSD-2-Clause; see LICENSE-cloudlibc). cosh.c/coshf.c are musl
+sources (see COPYRIGHT-musl); dlmalloc licensing is described in LICENSE.

@@ -17,3 +17,11 @@
 /lib/libtsan/
 /lib/.resources-receipt
 /lib/.resources-receipt.part
+
+# Curated musl/WASI supplements reconstructed from pinned archives.
+/vendor/musl/
+/vendor/wasi/dlmalloc/
+/vendor/wasi/libc-bottom-half/
+/vendor/wasi/libc-top-half/
+/vendor/.resources-*-receipt
+/vendor/.resources-*-receipt.part

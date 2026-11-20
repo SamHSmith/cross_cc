@@ -392,8 +392,8 @@ static int list_dir(const char *dir, Strs *out) {
 }
 static int is_symlink(const char *p) {
 #ifdef _WIN32
-    (void)p;
-    return 0;
+    DWORD attrs = GetFileAttributesA(p);
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
 #else
     struct stat st;
     return lstat(p, &st) == 0 && S_ISLNK(st.st_mode);

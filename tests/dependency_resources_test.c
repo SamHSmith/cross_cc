@@ -29,7 +29,7 @@ int main(int argc, char **argv) {
         o.root = argv[2];
         if (!strcmp(argv[1], "--build")) build(&o);
         else if (!strcmp(argv[1], "--package")) package_dist(&o);
-        else if (!strcmp(argv[1], "--prepare")) resources(&o);
+        else if (!strcmp(argv[1], "--prepare")) lib_resources(&o);
         else fail("unknown test action");
         return 0;
     }
