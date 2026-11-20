@@ -246,7 +246,11 @@ int main(int argc, char **argv) {
     char *zprefix = PJ(root, "apple-zstd");
     mkdirs(PJ(zprefix, "licenses"));
     write_file(PJ(zprefix, "licenses", "zstd-LICENSE"), "fixture notice\n");
+    write_file(PJ(llvm, "lib", "libLTO.dylib"), "");
     write_selfhost(&o, &dc, PJ(zprefix, "lib", "libzstd.a"), NULL);
+    Strs dl = split_lines(read_file(PJ(root, "dnative", "selfhost", "link.args"), NULL));
+    CHECK(has(&dl, "{llvm}/lib/libclangBasic.a") && has(&dl, "{llvm}/lib/liblldCommon.a"));
+    for (int i = 0; i < dl.n; i++) CHECK(!contains(dl.v[i], "lto_library") && !contains(dl.v[i], "libLTO"));
     Json *dj = json_load(selfhost_config(&o));
     CHECK(!strcmp(jstr(dj, "extra-licenses"), "apple-zstd/licenses"));
     CHECK(!strcmp(jstr(dj, "target"), "darwin-arm64") && !strcmp(jstr(dj, "cpu"), "generic") && !strcmp(jstr(dj, "sdk"), "MacOSX.sdk"));

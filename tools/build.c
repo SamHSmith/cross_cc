@@ -1195,7 +1195,6 @@ static void write_selfhost(const Opts *o, SelfhostCfg *c, const char *zstd, cons
     if (!strcmp(h->kind, "linux")) strs_add(&link, "-Wl,--end-group");
     else syslibs = capture_l(o, PJ(c->llvm, "bin", sfmt("llvm-config%s", EXE_SUFFIX)), "--link-static", "--system-libs", NULL);
     sp_link_tail(h, &link, syslibs, zstd, xml2);
-    if (!strcmp(h->kind, "apple") && is_file(PJ(c->llvm, "lib", "libLTO.dylib"))) strs_add(&link, "-Wl,-lto_library,{llvm}/lib/libLTO.dylib");
     char *link_file = PJ(rdir, "link.args");
     write_lines(link_file, &link);
     c->bridge_args = bridge_file;
