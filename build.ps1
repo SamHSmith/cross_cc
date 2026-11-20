@@ -23,7 +23,9 @@ function Resolve-Compiler([string]$path) {
     }
     for ($i = 0; $i -lt 40; $i++) {
         $item = Get-Item -LiteralPath $path -Force
-        if (!$item.Target) { return $item.FullName }
+        # Windows PowerShell 5.1 also sets Target on hard links; follow symlinks only.
+        $isReparse = ([int]$item.Attributes -band [int][IO.FileAttributes]::ReparsePoint) -ne 0
+        if (!$isReparse -or $item.LinkType -ne 'SymbolicLink' -or !$item.Target) { return $item.FullName }
         $target = @($item.Target)[0]
         if ([IO.Path]::IsPathRooted($target)) { $path = $target }
         else { $path = Join-Path $item.DirectoryName $target }
