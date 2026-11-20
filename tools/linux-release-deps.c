@@ -1,11 +1,16 @@
-/* Linux release support archives. Plain C, no Python or shell script required.
- *   cc -O1 -o tools/linux-release-deps tools/linux-release-deps.c
- *   tools/linux-release-deps [--lock=FILE] [--prefix=ABSOLUTE-DIR] [--cc=EXECUTABLE]
- * Pins are linux_release_deps in toolchain.lock.json. Does not modify the LLVM SDK. */
+/* Linux release support archives. Plain C; no Make, configure, Python or CMake.
+ *   tools/linux-release-deps --compiler=/abs/cross_cc [--lock=FILE] [--prefix=ABSOLUTE-DIR] [--jobs=N]
+ * zlib, zstd and libxml2 are compiled from fixed source lists with the selected
+ * cross_cc (`cross_cc cc`, `cross_cc ar`); without --compiler the first cross_cc on
+ * PATH is used. Pins are linux_release_deps in toolchain.lock.json. The only other
+ * programs run are curl and tar. Does not modify the LLVM SDK. */
 #include "common.h"
+#include "support_deps.h"
 
 typedef struct {
     char *root, *prefix, *cc;
+    int jobs;
+    SdCtx sd;
     Strs env;
 } Options;
 
@@ -48,12 +53,18 @@ static void deb(const Options *o, const Json *pins, const char *key) {
     char *archive = fetch(o, jobj(pins, key), sfmt("%s.deb", key));
     char *dir = PJ(o->prefix, "deb", key);
     mkdirs(dir);
-    run(o, dir, "ar", "x", archive, NULL);
+    Strs x = {0};
+    strs_add(&x, "x");
+    strs_add(&x, archive);
+    sd_ar(&o->sd, dir, &x);
     const char *payload = exists(PJ(dir, "data.tar.xz")) ? "data.tar.xz" : "data.tar.zst";
     run(o, o->root, "tar", "-xf", PJ(dir, payload), "-C", PJ(o->prefix, "sysroot"), NULL);
 }
 
 static void copy_to(const char *dst, const char *src) { copy_file(dst, src); }
+
+
+static char *find_compiler_checked(const char *arg) { return sd_find_compiler(arg); }
 
 int main(int argc, char **argv) {
     tool_name = "linux-release-deps";
@@ -61,15 +72,22 @@ int main(int argc, char **argv) {
     memset(&o, 0, sizeof o);
     o.root = find_root(argv[0]);
     o.prefix = PJ(o.root, ".cache", "linux-release-deps");
-    o.cc = "gcc";
+    o.jobs = cpu_count();
+    const char *compiler_arg = NULL;
     char *lock = PJ(o.root, "toolchain.lock.json");
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (starts_with(a, "--prefix=")) o.prefix = xstrdup(a + 9);
         else if (starts_with(a, "--lock=")) lock = xstrdup(a + 7);
-        else if (starts_with(a, "--cc=")) o.cc = xstrdup(a + 5);
+        else if (starts_with(a, "--compiler=")) compiler_arg = a + 11;
+        else if (starts_with(a, "--jobs=")) {
+            char *end;
+            long n = strtol(a + 7, &end, 10);
+            if (!a[7] || *end || n < 1) fail("--jobs needs a positive integer");
+            o.jobs = (int)n;
+        }
         else if (!strcmp(a, "--help")) {
-            puts("usage: tools/linux-release-deps [--lock=FILE] [--prefix=ABSOLUTE-DIR] [--cc=EXECUTABLE]");
+            puts("usage: tools/linux-release-deps --compiler=/abs/cross_cc [--lock=FILE] [--prefix=ABSOLUTE-DIR] [--jobs=N]");
             return 0;
         } else fail("unknown argument %s", a);
     }
@@ -77,14 +95,17 @@ int main(int argc, char **argv) {
     if (!is_abs(o.prefix)) fail("--prefix must be absolute");
     static const char *const dirs[] = {"downloads", "src", "lib", "licenses", "tmp", "sysroot", NULL};
     for (int i = 0; dirs[i]; i++) mkdirs(PJ(o.prefix, dirs[i]));
-    static const char *const drop[] = {"TMPDIR", "CC", "CFLAGS", "CPPFLAGS", "LDFLAGS", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "MAKEFLAGS", NULL};
+    o.cc = find_compiler_checked(compiler_arg);
+    static const char *const drop[] = {"TMPDIR", "CC", "CXX", "AR", "SDKROOT", "CFLAGS", "CPPFLAGS", "LDFLAGS", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "MAKEFLAGS", NULL};
     Strs extra = {0};
     strs_addf(&extra, "TMPDIR=%s", PJ(o.prefix, "tmp"));
-    strs_addf(&extra, "CC=%s", o.cc);
-    strs_add(&extra, "CFLAGS=-O2 -std=gnu11");
-    strs_add(&extra, "CPPFLAGS=");
-    strs_add(&extra, "LDFLAGS=");
     o.env = make_env(drop, &extra);
+    o.sd.compiler = o.cc;
+    o.sd.env = o.env.v;
+    o.sd.jobs = o.jobs;
+    strs_add(&o.sd.target, "-target");
+    strs_add(&o.sd.target, "x86_64-linux-gnu.2.34");
+    strs_add(&o.sd.target, "-march=x86-64-v2");
     Json *top = json_load(lock);
     if (top->type != J_OBJ) fail("lock is not an object");
     Json *pins = jobj(top, "linux_release_deps");
@@ -102,21 +123,16 @@ int main(int argc, char **argv) {
         printf("verified existing dependency prefix %s\n", o.prefix);
         return 0;
     }
-    char *prefix_arg = sfmt("--prefix=%s", o.prefix);
+    char *incdir = PJ(o.prefix, "include"), *libdir = PJ(o.prefix, "lib");
+    char *bld = PJ(o.prefix, "build");
     char *z = source(&o, pins, "zlib", ".tar.gz");
-    run(&o, z, PJ(z, "configure"), "--static", prefix_arg, NULL);
-    run(&o, z, "make", "-j2", NULL);
-    run(&o, z, "make", "install", NULL);
+    sd_build_zlib(&o.sd, z, PJ(bld, "zlib"), libdir, incdir, 1);
     char *zs = source(&o, pins, "zstd", ".tar.gz");
-    run(&o, zs, "make", "-j2", "-C", "lib", "libzstd.a-mt", NULL);
-    run(&o, zs, "make", "-C", "lib", "install-static", "install-includes", sfmt("PREFIX=%s", o.prefix), NULL);
+    sd_build_zstd(&o.sd, zs, PJ(bld, "zstd"), libdir, incdir, 1);
+    /* Complete XML parser and schemas; only HTTP, iconv, ICU, lzma, zlib, modules and
+     * language bindings are excluded (same options as the former configure line). */
     char *xml = source(&o, pins, "libxml2", ".tar.xz");
-    /* Keep the complete XML parser and schemas. Only unused external protocols,
-     * language bindings and optional external libraries are excluded. LLVM's
-     * Windows manifest merger retains its libxml2 implementation. */
-    run(&o, xml, PJ(xml, "configure"), prefix_arg, "--disable-shared", "--enable-static", "--without-python", "--without-lzma", "--without-zlib", "--without-iconv", "--without-icu", "--without-readline", "--without-http", "--without-modules", NULL);
-    run(&o, xml, "make", "-j2", NULL);
-    run(&o, xml, "make", "install", NULL);
+    sd_build_libxml2(&o.sd, jstr(jobj(pins, "libxml2"), "version"), xml, PJ(bld, "libxml2"), PJ(bld, "libxml2", "obj"), libdir, incdir);
     deb(&o, pins, "libstdcxx");
     deb(&o, pins, "libgcc");
     deb(&o, pins, "gcc_base");

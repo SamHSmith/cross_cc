@@ -1,15 +1,19 @@
-/* Static LLVM/Clang/LLD 22.1.8 SDK for the darwin-amd64 release. Plain C, run on macOS:
- *   cc -O1 -o tools/macos-x64-llvm tools/macos-x64-llvm.c
- *   tools/macos-x64-llvm [--work=DIR] [--jobs=N]
+/* darwin-amd64 release support: static x86_64 zstd, compiled from a fixed source list
+ * with the selected cross_cc (no Make). Plain C, run on macOS:
+ *   tools/macos-x64-llvm --compiler=/abs/cross_cc [--work=DIR] [--jobs=N] [--build-llvm]
+ * Without --compiler the first cross_cc on PATH is used. The default run produces only
+ * WORK/zstd. --build-llvm additionally runs the OPTIONAL LLVM-from-source build below
+ * (needs Xcode, CMake and Ninja; it is not part of the ordinary build path).
  * LLVM publishes no official macOS x86_64 archive after 20.1.7, so this builds the
  * pinned llvm-project source (compiler-rt.lock.json, fetched by tools/build setup)
  * with Apple's clang for x86_64, plus a static x86_64 zstd from the linux_release_deps
  * zstd pin in toolchain.lock.json. The result is WORK/prefix (tools/release
  * --llvm-prefix) with WORK/zstd/lib/libzstd.a. Needs Xcode, CMake, Ninja and curl. */
 #include "common.h"
+#include "support_deps.h"
 
 #define DEPLOYMENT_TARGET "11.0"
-#define USAGE "usage: tools/macos-x64-llvm [--work=DIR] [--jobs=N]\n"
+#define USAGE "usage: tools/macos-x64-llvm --compiler=/abs/cross_cc [--work=DIR] [--jobs=N] [--build-llvm]\n"
 
 static void run(const char *cwd, const Strs *cmd) {
     for (int i = 0; i < cmd->n; i++) printf("%s%s", i ? " " : "", cmd->v[i]);
@@ -49,10 +53,15 @@ int main(int argc, char **argv) {
     }
     char *root = find_root(argv[0]);
     char *work = PJ(root, ".cache", "llvm-darwin-amd64");
-    int jobs = cpu_count();
+    int jobs = cpu_count(), build_llvm = 0;
+    const char *compiler_arg = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (starts_with(a, "--work=")) {
+        if (starts_with(a, "--compiler=")) {
+            compiler_arg = a + 11;
+        } else if (!strcmp(a, "--build-llvm")) {
+            build_llvm = 1;
+        } else if (starts_with(a, "--work=")) {
             work = xstrdup(a + 7);
         } else if (starts_with(a, "--jobs=")) {
             char *end;
@@ -67,6 +76,42 @@ int main(int argc, char **argv) {
     if (strcmp(HOST_OS, "darwin")) fail("builds with Apple's SDK; run on macOS");
     if (!is_abs(work)) work = abs_path(work);
     mkdirs(work);
+
+    char *sdk = xstrdup(env_get("SDKROOT"));
+    if (!*sdk) sdk = capture_l(root, "xcrun", "--show-sdk-path", NULL);
+    char *compiler = sd_find_compiler(compiler_arg);
+
+    /* Static zstd, as the official macOS ARM64 LLVM links it. The pin is shared with the
+     * Linux release dependencies. Same recipe as lib/Makefile libzstd.a-mt. */
+    Json *zpin = jobj(jobj(json_load(PJ(root, "toolchain.lock.json")), "linux_release_deps"), "zstd");
+    char *zname = sfmt("zstd-%s", jstr(zpin, "version"));
+    char *zarchive = PJ(root, ".cache", "downloads", sfmt("%s.tar.gz", zname));
+    download_verified(jstr(zpin, "url"), jstr(zpin, "sha256"), zarchive, 600);
+    char *zprefix = PJ(work, "zstd");
+    char *zlib = PJ(zprefix, "lib", "libzstd.a");
+    if (!exists(zlib)) {
+        char *zsrc = PJ(work, zname);
+        remove_all(zsrc);
+        run_l(root, "tar", "-xf", zarchive, "-C", work, NULL);
+        static const char *const drop[] = {"CC", "CXX", "AR", "CFLAGS", "CPPFLAGS", "LDFLAGS", "SDKROOT", "MAKEFLAGS", NULL};
+        Strs none = {0};
+        Strs env = make_env(drop, &none);
+        SdCtx sd = {0};
+        sd.compiler = compiler;
+        sd.env = env.v;
+        sd.jobs = jobs;
+        strs_add(&sd.target, "-target");
+        strs_add(&sd.target, "x86_64-macos." DEPLOYMENT_TARGET);
+        strs_add(&sd.target, "-march=x86-64-v2");
+        strs_add(&sd.target, "-isysroot");
+        strs_add(&sd.target, sdk);
+        sd_build_zstd(&sd, zsrc, PJ(work, "zstd-obj"), PJ(zprefix, "lib"), PJ(zprefix, "include"), 0);
+        if (!exists(zlib)) fail("zstd build did not produce %s", zlib);
+    }
+    if (!build_llvm) {
+        printf("darwin-amd64 zstd ready: %s\n(pass --build-llvm for the optional LLVM-from-source SDK build)\n", zlib);
+        return 0;
+    }
 
     Json *pin = json_load(PJ(root, "compiler-rt.lock.json"));
     const char *url = jstr(pin, "url"), *sha = jstr(pin, "sha256"), *strip = jstr(pin, "strip_prefix");
@@ -92,8 +137,6 @@ int main(int argc, char **argv) {
         rename_path(tmp, src);
     }
 
-    char *sdk = xstrdup(env_get("SDKROOT"));
-    if (!*sdk) sdk = capture_l(root, "xcrun", "--show-sdk-path", NULL);
     /* LLVM 22 TAPI cannot read the arm64e.x1 entries in newer SDK .tbd stubs (macOS 27 SDK),
      * so the final link could not use the SDK libz/libxml2. Pick an older SDK via SDKROOT. */
     char *tbd_path = PJ(sdk, "usr", "lib", "libz.tbd");
@@ -101,23 +144,7 @@ int main(int argc, char **argv) {
     char *cc = capture_l(root, "xcrun", "--find", "clang", NULL);
     char *cxx = capture_l(root, "xcrun", "--find", "clang++", NULL);
 
-    /* Static zstd, as the official macOS ARM64 LLVM links it. The pin is shared with the
-     * Linux release dependencies. */
-    Json *zpin = jobj(jobj(json_load(PJ(root, "toolchain.lock.json")), "linux_release_deps"), "zstd");
-    char *zname = sfmt("zstd-%s", jstr(zpin, "version"));
-    char *zarchive = PJ(root, ".cache", "downloads", sfmt("%s.tar.gz", zname));
-    download_verified(jstr(zpin, "url"), jstr(zpin, "sha256"), zarchive, 600);
-    char *zprefix = PJ(work, "zstd");
-    char *zlib = PJ(zprefix, "lib", "libzstd.a");
-    if (!exists(zlib)) {
-        char *zsrc = PJ(work, zname);
-        remove_all(zsrc);
-        run_l(root, "tar", "-xf", zarchive, "-C", work, NULL);
-        char *zcc = sfmt("CC=%s -arch x86_64 -mmacosx-version-min=%s -isysroot %s", cc, DEPLOYMENT_TARGET, sdk);
-        run_l(zsrc, "make", sfmt("-j%d", jobs), "-C", "lib", zcc, "libzstd.a-mt", NULL);
-        run_l(zsrc, "make", "-C", "lib", zcc, "install-static", "install-includes", sfmt("PREFIX=%s", zprefix), NULL);
-        if (!exists(zlib)) fail("zstd build did not produce %s", zlib);
-    }
+
     char *build = PJ(work, "build"), *prefix = PJ(work, "prefix");
     Strs configure = {0};
     strs_add(&configure, "cmake");
