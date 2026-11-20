@@ -1219,6 +1219,35 @@ static char *apple_sdk(const Opts *o) {
     return NULL;
 }
 
+/* Both Apple hosts build their pinned zstd with the selected compiler. The
+ * SDK itself remains an explicit, separately supplied Apple input. */
+static char *prepare_apple_deps(const Opts *o, const SelfhostCfg *c) {
+    if (o->deps_prefix) {
+        char *lib = PJ(abs_path(o->deps_prefix), "lib", "libzstd.a");
+        if (!is_file(lib)) fail("--deps-prefix lacks %s", lib);
+        return lib;
+    }
+    Buf key = {0};
+    buf_addf(&key, "seed %s\nhost %s\nsdk %s\nsettings %s\n", sha256_file(o->compiler), c->h->host, c->sdk, sha256_file(PJ(c->sdk, "SDKSettings.json")));
+    static const char *const inputs[] = {"toolchain.lock.json", "tools/macos-x64-llvm.c", "tools/support_deps.h", "tools/common.h", NULL};
+    for (int i = 0; inputs[i]; i++) buf_addf(&key, "%s %s\n", inputs[i], sha256_file(PJ(o->root, inputs[i])));
+    const char *text = buf_cstr(&key);
+    char *hash = sha256_bytes(text, strlen(text));
+    hash[16] = 0;
+    char *work = PJ(o->root, ".cache", "support", sfmt("%s-%s", c->h->host, hash));
+    Strs cmd = {0};
+    strs_add(&cmd, PJ(o->self_dir, sfmt("macos-x64-llvm%s", EXE_SUFFIX)));
+    strs_addf(&cmd, "--compiler=%s", o->compiler);
+    strs_addf(&cmd, "--arch=%s", ends_with(c->h->host, "-arm64") ? "arm64" : "amd64");
+    strs_addf(&cmd, "--sdk=%s", c->sdk);
+    strs_addf(&cmd, "--work=%s", work);
+    strs_addf(&cmd, "--jobs=%d", o->jobs);
+    seed_must(o, o->root, &cmd);
+    char *lib = PJ(work, "zstd", "lib", "libzstd.a");
+    if (!is_file(lib)) fail("Apple support helper did not produce %s", lib);
+    return lib;
+}
+
 static char *msvc_sdk(const Opts *o) {
     if (o->host_sdk) return abs_path(o->host_sdk);
     const char *e = env_get("CROSS_CC_HOST_SDK");
@@ -1286,10 +1315,7 @@ static void prepare(Opts *o) {
             c.sdk = !strcmp(c.h->kind, "apple") ? apple_sdk(o) : msvc_sdk(o);
             char *why = NULL;
             if (!sp_sdk_ok(c.h, c.sdk, &why)) fail("%s", why);
-            if (o->deps_prefix) {
-                zstd = PJ(abs_path(o->deps_prefix), "lib", "libzstd.a");
-                if (!is_file(zstd)) fail("--deps-prefix lacks %s", zstd);
-            }
+            if (!strcmp(c.h->kind, "apple")) zstd = prepare_apple_deps(o, &c);
             char *xml2 = NULL;
             if (!strcmp(c.h->kind, "msvc")) xml2 = msvc_libxml2(o, &c);
             write_selfhost(o, &c, zstd, xml2);

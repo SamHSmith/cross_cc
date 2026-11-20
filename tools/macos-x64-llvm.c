@@ -13,7 +13,7 @@
 #include "support_deps.h"
 
 #define DEPLOYMENT_TARGET "11.0"
-#define USAGE "usage: tools/macos-x64-llvm --compiler=/abs/cross_cc [--work=DIR] [--jobs=N] [--build-llvm]\n"
+#define USAGE "usage: tools/macos-x64-llvm --compiler=/abs/cross_cc [--arch=amd64|arm64] [--sdk=DIR] [--work=DIR] [--jobs=N] [--build-llvm]\n"
 
 static void run(const char *cwd, const Strs *cmd) {
     for (int i = 0; i < cmd->n; i++) printf("%s%s", i ? " " : "", cmd->v[i]);
@@ -52,13 +52,18 @@ int main(int argc, char **argv) {
         return 0;
     }
     char *root = find_root(argv[0]);
-    char *work = PJ(root, ".cache", "llvm-darwin-amd64");
+    char *work = NULL;
     int jobs = cpu_count(), build_llvm = 0;
-    const char *compiler_arg = NULL;
+    const char *compiler_arg = NULL, *arch = "amd64", *sdk_arg = NULL;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
         if (starts_with(a, "--compiler=")) {
             compiler_arg = a + 11;
+        } else if (starts_with(a, "--arch=")) {
+            arch = a + 7;
+            if (strcmp(arch, "amd64") && strcmp(arch, "arm64")) fail("--arch must be amd64 or arm64");
+        } else if (starts_with(a, "--sdk=")) {
+            sdk_arg = a + 6;
         } else if (!strcmp(a, "--build-llvm")) {
             build_llvm = 1;
         } else if (starts_with(a, "--work=")) {
@@ -74,11 +79,13 @@ int main(int argc, char **argv) {
         }
     }
     if (strcmp(HOST_OS, "darwin")) fail("builds with Apple's SDK; run on macOS");
+    if (build_llvm && strcmp(arch, "amd64")) fail("--build-llvm is Intel-only; use the pinned official ARM64 SDK");
+    if (!work) work = PJ(root, ".cache", sfmt("llvm-darwin-%s", arch));
     if (!is_abs(work)) work = abs_path(work);
     mkdirs(work);
 
-    char *sdk = xstrdup(env_get("SDKROOT"));
-    if (!*sdk) sdk = capture_l(root, "xcrun", "--show-sdk-path", NULL);
+    char *sdk = sdk_arg ? abs_path(sdk_arg) : xstrdup(env_get("SDKROOT"));
+    if (!*sdk) sdk = trim(capture_l(root, "xcrun", "--show-sdk-path", NULL));
     char *compiler = sd_find_compiler(compiler_arg);
 
     /* Static zstd, as the official macOS ARM64 LLVM links it. The pin is shared with the
@@ -89,7 +96,16 @@ int main(int argc, char **argv) {
     download_verified(jstr(zpin, "url"), jstr(zpin, "sha256"), zarchive, 600);
     char *zprefix = PJ(work, "zstd");
     char *zlib = PJ(zprefix, "lib", "libzstd.a");
-    if (!exists(zlib)) {
+    static const char *const dirs[] = {"lib", "include", "licenses", NULL};
+    Buf identity = {0};
+    buf_addf(&identity, "recipe macos-zstd-v2\narch %s\ncompiler %s\nsdk %s\nsdk-settings %s\nlock %s\nhelper %s\nrecipes %s\ncommon %s\nmanifest\n", arch, sha256_file(compiler), sdk, sha256_file(PJ(sdk, "SDKSettings.json")), sha256_file(PJ(root, "toolchain.lock.json")), sha256_file(PJ(root, "tools", "macos-x64-llvm.c")), sha256_file(PJ(root, "tools", "support_deps.h")), sha256_file(PJ(root, "tools", "common.h")));
+    char *receipt = PJ(zprefix, "complete.sha256");
+    if (exists(receipt)) {
+        char *want = sfmt("%s%s", buf_cstr(&identity), sd_manifest(zprefix, dirs));
+        if (strcmp(read_file(receipt, NULL), want)) fail("zstd prefix %s differs from its receipt; choose a fresh --work", zprefix);
+        if (!is_file(zlib)) fail("zstd prefix lacks %s", zlib);
+    } else {
+        if (exists(zlib)) fail("unverified zstd prefix %s; choose a fresh --work", zprefix);
         char *zsrc = PJ(work, zname);
         remove_all(zsrc);
         run_l(root, "tar", "-xf", zarchive, "-C", work, NULL);
@@ -100,15 +116,19 @@ int main(int argc, char **argv) {
         sd.env = env.v;
         sd.jobs = jobs;
         strs_add(&sd.target, "-target");
-        strs_add(&sd.target, "x86_64-macos." DEPLOYMENT_TARGET);
-        strs_add(&sd.target, "-march=x86-64-v2");
+        strs_addf(&sd.target, "%s-macos." DEPLOYMENT_TARGET, !strcmp(arch, "amd64") ? "x86_64" : "aarch64");
+        strs_add(&sd.target, !strcmp(arch, "amd64") ? "-march=x86-64-v2" : "-mcpu=generic");
         strs_add(&sd.target, "-isysroot");
         strs_add(&sd.target, sdk);
         sd_build_zstd(&sd, zsrc, PJ(work, "zstd-obj"), PJ(zprefix, "lib"), PJ(zprefix, "include"), 0);
         if (!exists(zlib)) fail("zstd build did not produce %s", zlib);
+        mkdirs(PJ(zprefix, "licenses"));
+        copy_file(PJ(zprefix, "licenses", "zstd-LICENSE"), PJ(zsrc, "LICENSE"));
+        copy_file(PJ(zprefix, "licenses", "zstd-COPYING"), PJ(zsrc, "COPYING"));
+        write_file(receipt, sfmt("%s%s", buf_cstr(&identity), sd_manifest(zprefix, dirs)));
     }
     if (!build_llvm) {
-        printf("darwin-amd64 zstd ready: %s\n(pass --build-llvm for the optional LLVM-from-source SDK build)\n", zlib);
+        printf("darwin-%s zstd ready: %s\n(pass --build-llvm for the optional Intel LLVM-from-source SDK build)\n", arch, zlib);
         return 0;
     }
 
@@ -179,10 +199,10 @@ int main(int argc, char **argv) {
     char *h = exists(PJ(prefix, "include", "llvm", "Config", "llvm-config.h")) ? read_file(PJ(prefix, "include", "llvm", "Config", "llvm-config.h"), NULL) : xstrdup("");
     if (!contains(h, "#define LLVM_VERSION_MAJOR 22") || !contains(h, "#define LLVM_VERSION_PATCH 8")) fail("installed prefix is not LLVM 22.1.8");
     if (!exists(config)) fail("installed prefix lacks %s", config);
-    Buf receipt = {0};
-    buf_addf(&receipt, "recipe macos-x64-llvm-v1\nsource %s\nsource-sha256 %s\nsdk %s\nsdk-version %s\ncompiler %s\n", url, sha, sdk, sdk_version(sdk), capture_l(root, cxx, "--version", NULL));
-    for (int i = 1; i < configure.n; i++) buf_addf(&receipt, "configure-arg %s\n", configure.v[i]);
-    write_file(PJ(prefix, "cross_cc-llvm-build.txt"), buf_cstr(&receipt));
+    Buf llvm_receipt = {0};
+    buf_addf(&llvm_receipt, "recipe macos-x64-llvm-v1\nsource %s\nsource-sha256 %s\nsdk %s\nsdk-version %s\ncompiler %s\n", url, sha, sdk, sdk_version(sdk), capture_l(root, cxx, "--version", NULL));
+    for (int i = 1; i < configure.n; i++) buf_addf(&llvm_receipt, "configure-arg %s\n", configure.v[i]);
+    write_file(PJ(prefix, "cross_cc-llvm-build.txt"), buf_cstr(&llvm_receipt));
     printf("darwin-amd64 LLVM SDK ready: %s\n", prefix);
     return 0;
 }
