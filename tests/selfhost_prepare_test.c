@@ -71,8 +71,24 @@ int main(int argc, char **argv) {
             CHECK(file_size(PJ(probe, "main.o")) > 0);
             /* Use the generated tail with an immutable seed too: the CRT's
              * combined chkstk/_alloca_probe member must precede auto builtins,
-             * while O0's automatically supplied UBSan must remain available. */
-            write_file(source, "extern void _alloca_probe(void);\nvoid (*volatile probe_ref)(void) = _alloca_probe;\n__declspec(noinline) void touch(volatile char *p) { p[0] = 9; p[16383] = 3; }\nint main(int argc, char **argv) { volatile char stack[16384]; touch(stack); volatile int divisor = argc; return stack[0] / divisor + stack[16383] - 12 + (probe_ref == 0); }\n");
+             * while O0's automatically supplied UBSan must remain available.
+             * LLVM's Windows driver and libxml2 also require these four OS
+             * imports even when llvm-config --system-libs omits their libraries. */
+            write_file(source,
+                "#include <windows.h>\n#include <winver.h>\n#include <bcrypt.h>\n"
+                "extern void _alloca_probe(void);\n"
+                "void (*volatile probe_ref)(void) = _alloca_probe;\n"
+                "__declspec(noinline) void touch(volatile char *p) { p[0] = 9; p[16383] = 3; }\n"
+                "int main(int argc, char **argv) {\n"
+                "  volatile char stack[16384]; touch(stack); volatile int divisor = argc;\n"
+                "  DWORD ignored = 0, size = GetFileVersionInfoSizeW(L\"cross_cc.exe\", &ignored);\n"
+                "  char version[256] = {0}; void *value = 0; UINT value_size = 0;\n"
+                "  int imports = GetFileVersionInfoW(L\"cross_cc.exe\", 0, sizeof(version), version);\n"
+                "  imports += VerQueryValueW(version, L\"\\\\\", &value, &value_size);\n"
+                "  unsigned char random = 0;\n"
+                "  imports += BCryptGenRandom(0, &random, 1, BCRYPT_USE_SYSTEM_PREFERRED_RNG);\n"
+                "  return stack[0] / divisor + stack[16383] - 12 + (probe_ref == 0) + imports + size;\n"
+                "}\n");
             for (int mode = 0; mode < 2; mode++) {
                 char *obj = PJ(probe, "stack.o");
                 char *compile[] = {(char *)compiler, "cc", "-target", "x86_64-windows-msvc", mode ? "-O0" : "-O2", "-fms-runtime-lib=static", "-c", source, "-o", obj, NULL};
@@ -88,7 +104,7 @@ int main(int argc, char **argv) {
                 strs_add(&link, "-s"); strs_add(&link, "-o"); strs_add(&link, exe);
                 if (run_cmd(link.v, o.root, env.v)) fail("generated Windows CRT recipe failed (%s)", mode ? "debug" : "release");
             }
-            puts("generated MSVC recipe: release and O0 debug stackprobe links passed");
+            puts("generated MSVC recipe: release and O0 debug stackprobe/OS import links passed");
             remove_all(probe);
             return failures ? 1 : 0;
         } else if (!strcmp(argv[1], "--prepare")) {
@@ -228,6 +244,7 @@ int main(int argc, char **argv) {
     CHECK(!strcmp(wt.v[4], "{sdk}/sdk/lib/ucrt/x86_64/libucrt.lib"));
     CHECK(!has(&wt, "-nostdlib")); /* Preserve automatic debug UBSan. */
     CHECK(has(&wt, "-lkernel32")); /* Required even without LLVM system-libs. */
+    CHECK(has(&wt, "-lversion") && has(&wt, "-lbcrypt")); /* LLVM driver and libxml2 imports. */
     CHECK(!has(&dt, "-nodefaultlibs") && !has(&ll, "-nodefaultlibs"));
     CHECK(has(&wt, "-lpsapi") && has(&wt, "-lshell32") && has(&wt, "-lole32") && has(&wt, "-L{sdk}/crt/lib/x86_64"));
     CHECK(child(self, "--darwin-nozstd", "x") != 0);
@@ -259,6 +276,7 @@ int main(int argc, char **argv) {
     Strs wl = split_lines(read_file(PJ(root, "wnative", "selfhost", "link.args"), NULL));
     CHECK(has(&wl, "{windows_path}") && has(&wl, "-lpsapi") && has(&wl, "{llvm}/lib/libLLVMSupport.a"));
     CHECK(has(&wl, "-nodefaultlibs") && has(&wl, "-lkernel32") && !has(&wl, "-nostdlib"));
+    CHECK(has(&wl, "-lversion") && has(&wl, "-lbcrypt"));
     for (int i = 1; i <= 4; i++) CHECK(has(&wl, wt.v[i]));
     CHECK(has(&wl, "{llvm}/lib/clangBasic.lib") && has(&wl, "{llvm}/lib/lldCommon.lib"));
     CHECK(!has(&wl, "{llvm}/lib/libclangBasic.a") && !has(&wl, "-Wl,--start-group"));
