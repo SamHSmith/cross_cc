@@ -23,27 +23,14 @@ static void put(const char *path, const char *text) {
     write_file(path, text);
 }
 
-/* Compare filesystem path spellings: on Windows '\\' and '/' are the same
- * separator, repeated separators collapse and case is insignificant. Elsewhere
- * paths compare exactly. `windows` is a parameter so Linux can test the rule. */
-static char *fs_path_key(const char *p, int windows) {
-    char *k = xstrdup(p);
-    size_t n = 0;
-    for (size_t i = 0; p[i]; i++) {
-        char c = p[i];
-        if (windows) {
-            if (c == '\\') c = '/';
-            else if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
-            if (c == '/' && n && k[n - 1] == '/') continue;
-        }
-        k[n++] = c;
-    }
-    if (windows) while (n > 1 && k[n - 1] == '/') n--;
-    k[n] = 0;
-    return k;
-}
+/* On Windows '\\' and '/' are the same separator; every other byte (case,
+ * repeated separators) must match exactly. `windows` lets Linux test the rule. */
 static int same_path_rule(const char *a, const char *b, int windows) {
-    return !strcmp(fs_path_key(a, windows), fs_path_key(b, windows));
+    for (; *a && *b; a++, b++) {
+        int sep = windows && (*a == '/' || *a == '\\') && (*b == '/' || *b == '\\');
+        if (*a != *b && !sep) return 0;
+    }
+    return *a == *b;
 }
 #ifdef _WIN32
 #define same_fs_path(a, b) same_path_rule((a), (b), 1)
@@ -317,8 +304,11 @@ int main(int argc, char **argv) {
     }
     tool_name = "selfhost_pipeline_test";
     /* Windows spelling rules (checked on every host) and exact POSIX rules. */
-    CHECK(same_path_rule("C:\\Work\\.cache\\downloads\\mock-llvm.tar", "c:/work/.cache//downloads/mock-llvm.tar", 1));
+    CHECK(same_path_rule("C:\\Work\\.cache\\downloads\\mock-llvm.tar", "C:/Work/.cache/downloads/mock-llvm.tar", 1));
     CHECK(!same_path_rule("C:\\Work\\.cache\\downloads\\other.tar", "C:/Work/.cache/downloads/mock-llvm.tar", 1));
+    CHECK(!same_path_rule("C:\\Work\\.cache\\downloads\\mock-llvm.tar", "C:/work/.cache/downloads/mock-llvm.tar", 1));
+    CHECK(!same_path_rule("C:/Work/.cache//downloads/mock-llvm.tar", "C:/Work/.cache/downloads/mock-llvm.tar", 1));
+    CHECK(!same_path_rule("C:/Work/a", "C:/Work/a/", 1));
     CHECK(!same_path_rule("/a/b", "/A/b", 0));
     CHECK(!same_path_rule("a\\b", "a/b", 0));
     char *self = abs_path(argv[0]);
