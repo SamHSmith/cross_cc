@@ -1,8 +1,11 @@
 /* Cold-cache priming check (no real compiler, archives or network):
- *   support_deps_check --prime-mock /abs/workdir
+ *   support_deps_check --prime-mock /abs/NEW-workdir   (must not exist; it is created,
+ *                                                        removed on success, kept on failure)
  * Drives sd_static_lib against a mock compiler and verifies the single no-target
- * `cc -dumpmachine` query, its env/cwd, ordering before every compile, preserved
- * concurrency, and that a failing query aborts before any compile starts.
+ * `cc -dumpmachine` query (issued the same way on every supported host), its env/cwd,
+ * ordering before every compile, preserved concurrency, and that a failing query aborts
+ * before any compile starts. The normal mode below also runs it in an owned subdirectory
+ * of its work path.
  *
  * Support-library test. Build with any C compiler, then:
  *   support_deps_test /abs/cross_cc /abs/linux-release-deps-prefix [/abs/workdir]
@@ -90,7 +93,7 @@ static int prime_mock(const char *work) {
     char *mdir = PJ(work, "mock"), *cc = PJ(mdir, "cross_cc");
     char *log = PJ(mdir, "log"), *conc = PJ(mdir, "conc");
     char *src = PJ(work, "src"), *cache = PJ(work, "cache"), *tmp = PJ(work, "tmp");
-    remove_all(work);
+    if (exists(work)) { fprintf(stderr, "prime-mock: refusing existing path %s\n", work); return 2; }
     mkdirs(mdir); mkdirs(src);
     write_file(PJ(mdir, "upstream.lock.json"), "{}\n");
     write_file(cc, MOCK_SH);
@@ -137,16 +140,19 @@ static int prime_mock(const char *work) {
     remove_file(PJ(work, "libt.a"));
     fflush(stdout); fflush(stderr);
     pid_t pid = fork();
+    PCHECK(pid >= 0);
     if (pid == 0) {
         sd_static_lib(&c, src, srcs, &flags, PJ(work, "obj"), PJ(work, "libt.a"));
         _exit(0);
     }
-    int st = 0;
-    waitpid(pid, &st, 0);
+    int st = 0, wr;
+    while ((wr = (int)waitpid(pid, &st, 0)) < 0 && errno == EINTR) {}
+    PCHECK(wr == (int)pid);
     PCHECK(WIFEXITED(st) && WEXITSTATUS(st) != 0);
     PCHECK(count_lines(log, "-dumpmachine", NULL) == 1);
     PCHECK(count_lines(log, "", NULL) == 1);
     PCHECK(!is_file(PJ(work, "libt.a")));
+    remove_all(work); /* created by this function above, so owned */
     puts("support_deps_check --prime-mock: PASS");
     return 0;
 }
@@ -164,6 +170,11 @@ int main(int argc, char **argv) {
     char cmd[8192];
     snprintf(cmd, sizeof cmd, "%s/tmp", prefix); mkdir(cmd, 0777);
     mkdir(work, 0777);
+    {
+        char owned[4400];
+        snprintf(owned, sizeof owned, "%s/prime-mock-%ld", work, (long)getpid());
+        if (prime_mock(owned) != 0) { fputs("support_deps_test: prime-mock failed\n", stderr); return 1; }
+    }
     /* Isolation: the seed uses its own resources, not a checkout's. */
     unsetenv("CROSS_CC_LIB_DIR"); unsetenv("ZIG_LIB_DIR"); unsetenv("ZIG_LIBC"); unsetenv("CC"); unsetenv("CFLAGS");
     unsetenv("CPATH"); unsetenv("LIBRARY_PATH"); unsetenv("C_INCLUDE_PATH");
