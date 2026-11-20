@@ -45,10 +45,10 @@ int main(int argc, char **argv) {
             load_host_config(&o, &c);
         } else if (!strcmp(argv[1], "--darwin-nozstd")) {
             Strs a = {0};
-            sp_link_tail(selfhost_host("darwin-arm64"), &a, "-lm -lzstd", NULL);
+            sp_link_tail(selfhost_host("darwin-arm64"), &a, "-lm -lzstd", NULL, NULL);
         } else if (!strcmp(argv[1], "--abs-syslib")) {
             Strs a = {0};
-            sp_link_tail(selfhost_host("windows-amd64"), &a, "/opt/builder/libfoo.a", NULL);
+            sp_link_tail(selfhost_host("windows-amd64"), &a, "/opt/builder/libfoo.a", NULL, NULL);
         } else if (!strcmp(argv[1], "--prepare")) {
             o.root = argv[2];
             prepare(&o);
@@ -133,7 +133,7 @@ int main(int argc, char **argv) {
     chmod(config, 0755);
     char *ndir = PJ(root, ".cache", "native");
     SelfhostCfg lc = {selfhost_host("linux-amd64"), llvm, sdk, ndir, NULL, NULL, "x86-64-v2", "2.34", 1};
-    write_selfhost(&o, &lc, NULL);
+    write_selfhost(&o, &lc, NULL, NULL);
     Json *cfg = json_load(selfhost_config(&o));
     CHECK(!strcmp(jstr(cfg, "target"), "linux-amd64"));
     CHECK(!strcmp(jstr(cfg, "llvm-prefix"), ".cache/native/llvm"));
@@ -166,15 +166,16 @@ int main(int argc, char **argv) {
     Strs db = sp_bridge_args(selfhost_host("darwin-arm64"));
     CHECK(db.n == 2 && !strcmp(db.v[0], "-isysroot") && !strcmp(db.v[1], "{sdk}"));
     Strs wb = sp_bridge_args(selfhost_host("windows-amd64"));
-    CHECK(has(&wb, "{sdk}/crt/include") && has(&wb, "{sdk}/sdk/include/ucrt") && has(&wb, "-fms-runtime-lib=static") && has(&wb, "{root}/lib/include"));
+    CHECK(has(&wb, "{sdk}/crt/include") && has(&wb, "{sdk}/sdk/include/ucrt") && has(&wb, "-fms-runtime-lib=static") && has(&wb, "-D_ITERATOR_DEBUG_LEVEL=0") && has(&wb, "{root}/lib/include"));
     Strs wh = {0};
     sp_link_head(selfhost_host("windows-amd64"), &wh);
     CHECK(has(&wh, "{windows_path}") && has(&wh, "{bridge}") && !has(&wh, "-Wl,--start-group"));
     Strs dt = {0};
-    sp_link_tail(selfhost_host("darwin-arm64"), &dt, "-lm -lz -lzstd -lxml2", "/pinned/zstd/lib/libzstd.a");
+    sp_link_tail(selfhost_host("darwin-arm64"), &dt, "-lm -lz -lzstd -lxml2", "/pinned/zstd/lib/libzstd.a", NULL);
     CHECK(has(&dt, "/pinned/zstd/lib/libzstd.a") && !has(&dt, "-lzstd") && has(&dt, "-lc++") && has(&dt, "-L{sdk}/usr/lib") && has(&dt, "-lxml2"));
     Strs wt = {0};
-    sp_link_tail(selfhost_host("windows-amd64"), &wt, "psapi.lib shell32.lib -lole32", NULL);
+    sp_link_tail(selfhost_host("windows-amd64"), &wt, "psapi.lib shell32.lib -lole32 xml2s.lib", NULL, "/x/libxml2s.lib");
+    CHECK(has(&wt, "/x/libxml2s.lib") && !has(&wt, "-lxml2s"));
     CHECK(has(&wt, "-lpsapi") && has(&wt, "-lshell32") && has(&wt, "-lole32") && has(&wt, "-L{sdk}/crt/lib/x86_64"));
     CHECK(child(self, "--darwin-nozstd", "x") != 0);
     CHECK(child(self, "--abs-syslib", "x") != 0);
@@ -195,13 +196,13 @@ int main(int argc, char **argv) {
     /* Generated darwin and windows recipes from the fake SDK. */
     write_file(config, "#!/bin/sh\ncase \"$2\" in --libnames) echo libLLVMSupport.a libLLVMDemangle.a;; --system-libs) echo -lm -lz psapi.lib;; esac\n");
     SelfhostCfg wc = {selfhost_host("windows-amd64"), llvm, splat, PJ(root, "wnative"), NULL, NULL, "x86-64-v2", NULL, 0};
-    write_selfhost(&o, &wc, NULL);
+    write_selfhost(&o, &wc, NULL, "/x/libxml2s.lib");
     Json *wj = json_load(selfhost_config(&o));
     CHECK(!strcmp(jstr(wj, "target"), "windows-amd64") && !strcmp(jstr(wj, "path-args"), "wnative/selfhost/bridge.args") && !*jstr_opt(wj, "linux-glibc"));
     Strs wl = split_lines(read_file(PJ(root, "wnative", "selfhost", "link.args"), NULL));
     CHECK(has(&wl, "{windows_path}") && has(&wl, "-lpsapi") && has(&wl, "{llvm}/lib/libLLVMSupport.a"));
     SelfhostCfg dc = {selfhost_host("darwin-arm64"), llvm, apple, PJ(root, "dnative"), NULL, NULL, "generic", NULL, 0};
-    write_selfhost(&o, &dc, NULL);
+    write_selfhost(&o, &dc, NULL, NULL);
     Json *dj = json_load(selfhost_config(&o));
     CHECK(!strcmp(jstr(dj, "target"), "darwin-arm64") && !strcmp(jstr(dj, "cpu"), "generic") && !strcmp(jstr(dj, "sdk"), "MacOSX.sdk"));
 

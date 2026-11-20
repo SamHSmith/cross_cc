@@ -58,21 +58,23 @@ static Strs sp_bridge_args(const SelfhostHost *h) {
         strs_addf(&a, "{sdk}/%s", MSVC_INCLUDES[i]);
     }
     /* Official Windows LLVM libraries use the static CRT (/MT). */
-    strs_add(&a, "-fms-runtime-lib=static");
-    strs_add(&a, "-D_HAS_EXCEPTIONS=0");
+    static const char *const w[] = {"-D_CRT_SECURE_NO_WARNINGS", "-D_SCL_SECURE_NO_WARNINGS", "-D_ITERATOR_DEBUG_LEVEL=0", "-D_MT", "-fms-runtime-lib=static", NULL};
+    strs_addv(&a, w);
     return a;
 }
 
 /* llvm-config --system-libs as link arguments. Absolute paths from the LLVM
- * builder's machine are refused, except zstd, which comes from the pinned
- * support prefix (zstd_archive, may be NULL when not needed). */
-static void sp_system_libs(Strs *a, const char *system_libs, const char *zstd_archive, const char *host) {
+ * builder's machine are refused, except zstd (pinned support prefix) and
+ * libxml2 (built by prepare on Windows); either archive may be NULL. */
+static void sp_system_libs(Strs *a, const char *system_libs, const char *zstd_archive, const char *xml2_archive, const char *host) {
     Strs t = split_fields(system_libs);
     for (int i = 0; i < t.n; i++) {
         const char *x = t.v[i];
         if (contains(x, "zstd")) {
             if (!zstd_archive) fail("LLVM SDK for %s needs zstd (%s); pass --deps-prefix=DIR holding lib/libzstd.a (tools/macos-x64-llvm builds the pinned one)", host, x);
             strs_add(a, zstd_archive);
+        } else if (xml2_archive && contains(x, "xml2")) {
+            strs_add(a, xml2_archive);
         } else if (ends_with(x, ".lib")) {
             strs_addf(a, "-l%.*s", (int)(strlen(x) - 4), x);
         } else if (x[0] == '-') {
@@ -84,19 +86,19 @@ static void sp_system_libs(Strs *a, const char *system_libs, const char *zstd_ar
 }
 
 /* Final link recipe tail after the LLVM archives, with placeholders. */
-static void sp_link_tail(const SelfhostHost *h, Strs *a, const char *system_libs, const char *zstd_archive) {
+static void sp_link_tail(const SelfhostHost *h, Strs *a, const char *system_libs, const char *zstd_archive, const char *xml2_archive) {
     if (!strcmp(h->kind, "linux")) {
         host_runtime_args(a, "{sdk}");
         return;
     }
     if (!strcmp(h->kind, "apple")) {
-        sp_system_libs(a, system_libs, zstd_archive, h->host);
+        sp_system_libs(a, system_libs, zstd_archive, xml2_archive, h->host);
         strs_add(a, "-L{sdk}/usr/lib");
         strs_add(a, "-lc++");
         return;
     }
     for (int i = 0; MSVC_LIBDIRS[i]; i++) strs_addf(a, "-L{sdk}/%s", MSVC_LIBDIRS[i]);
-    sp_system_libs(a, system_libs, zstd_archive, h->host);
+    sp_system_libs(a, system_libs, zstd_archive, xml2_archive, h->host);
 }
 
 /* Head of the final link recipe (release.c requires these exact inputs). */

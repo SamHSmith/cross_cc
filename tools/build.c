@@ -2,7 +2,6 @@
  * selected seed: <seed> cc -O1 -o build/tools/build tools/build.c, then
  * build/tools/build [command] --compiler=<seed>. */
 #include "common.h"
-#include "windows_path/windows_path.c"
 
 static const char USAGE[] =
     "cross_cc build tool (normally run through the launcher, which selects the seed)\n"
@@ -14,7 +13,10 @@ static const char USAGE[] =
     "  setup        resources plus compiler-rt and libbacktrace sources (--reference: test binary)\n"
     "  prepare      setup, the pinned host LLVM SDK, the GNU-ABI support SDK (linux-release-deps),\n"
     "               native-dir sources and the host recipe .cache/native/selfhost.json; every\n"
-    "               compilation uses the seed only (linux-amd64 hosts)\n"
+    "               compilation uses the seed only. Hosts: linux-amd64 (pinned GNU-ABI support\n"
+    "               SDK), darwin-arm64 (system Apple SDK; --sdk or SDKROOT), darwin-amd64\n"
+    "               (LLVM_PREFIX from tools/macos-x64-llvm), windows-amd64 (--sdk=MSVC splat whose\n"
+    "               license you accepted); --host-config=FILE supplies a complete recipe instead\n"
     "  build        prepare, then the staged release pipeline publishes bin/cross_cc\n"
     "               (--profile=debug|release) and the argv0 alias copies\n"
     "  release      prepare, then the release tool with every other --key=value forwarded\n"
@@ -23,13 +25,15 @@ static const char USAGE[] =
     "               --extra-licenses, --msvc-helper, --upstream, --binary)\n"
     "  tools        recompile the sibling helper tools with the seed\n"
     "  check-tools  compile every tool with -Wall using the seed and run the path helper tests\n"
-    "  native       legacy: backend archive with a system C++ compiler (CXX); not used by build\n"
+    "  native       compatibility alias of build\n"
     "  help         this text\n"
     "\n"
     "options: --compiler=FILE --profile=debug|release --jobs=N --deps-prefix=DIR (exact\n"
-    "  linux-release-deps prefix; default .cache/support/linux-amd64-<key>) --reference --native-dir=DIR (native)\n"
+    "  linux-release-deps prefix; default .cache/support/linux-amd64-<key>; darwin: holds lib/libzstd.a)\n"
+    "  --sdk=DIR --host-config=FILE --reference\n"
     "environment: LLVM_PREFIX (LLVM 22.1.8 static SDK instead of the pinned archive),\n"
-    "  CROSS_CC_SEED_ROOT (seed resources; else found above the seed binary)\n"
+    "  CROSS_CC_SEED_ROOT (seed resources; else found above the seed binary),\n"
+    "  CROSS_CC_HOST_SDK (windows-amd64 MSVC splat, like --sdk)\n"
     "\n"
     "All temp/cache/build output stays under .cache/ and build/ (TMPDIR=.cache/tmp).\n"
     "Pins: upstream.lock.json, toolchain.lock.json, compiler-rt.lock.json.\n";
@@ -128,7 +132,6 @@ static const char *host_key(void) {
     return sfmt("%s-%s", HOST_OS, HOST_ARCH);
 }
 
-static void native(Opts *o);
 
 /* Only setup/resources acquires source dependencies. Build/package stay offline.
  * The receipt binds the extracted cache to both the archive and selection recipe.
@@ -585,129 +588,10 @@ static char *static_lib(const char *libdir, const char *name) {
     return f;
 }
 
-/* Quoting is consumed by split_quoted in `build`, not by a shell. */
-static void link_path(Buf *sb, const char *file) {
-    char *p = IS_WIN ? replace_all(file, "\\", "/") : xstrdup(file);
-    buf_addf(sb, " \"%s\"", p);
-}
 
-/* Resolve external archives before compiling any bridge objects. An explicit
- * override is authoritative, including when the supplied path is invalid. */
-static char *external_library(const char *env, const char *reported, const char *const *candidates) {
-    const char *override = env_get(env);
-    if (*override) {
-        if (!is_abs(override) || !exists(override)) fail("%s=%s must name an existing absolute library path", env, override);
-        return xstrdup(override);
-    }
-    if (is_abs(reported) && exists(reported)) return xstrdup(reported);
-    for (int i = 0; candidates[i]; i++) {
-        if (*candidates[i] && exists(candidates[i])) return xstrdup(candidates[i]);
-    }
-    fail("required LLVM dependency %s not found; install its static library and set %s to its absolute path", reported, env);
-    return NULL;
-}
 
-/* The pinned Windows SDK embeds rpmalloc's CRT overrides as an isolated
- * Support member. Use the host CRT instead: strip only that member from a
- * private copy, never from the SDK. */
-static char *normalize_windows_support(const Opts *o, const char *ar, const char *support, const char *ndir) {
-    char *listing = capture_l(o, ar, "t", support, NULL);
-    Strs members = split_lines(listing);
-    char *member = NULL;
-    for (int i = 0; i < members.n; i++) {
-        char *name = replace_all(trim(members.v[i]), "\\", "/");
-        if (ends_with(name, "/rpmalloc/rpmalloc.c.obj")) {
-            if (member) fail("%s contains multiple rpmalloc members; refusing normalization", support);
-            member = trim(members.v[i]);
-        }
-    }
-    if (!member) return xstrdup(support);
-    char *out = PJ(ndir, "LLVMSupport-norpmalloc.lib");
-    char *stage = sfmt("%s.tmp.lib", out);
-    remove_file(stage);
-    copy_file(stage, support);
-    /* P matches the full archive member path rather than only its basename. */
-    must_l(o, o->root, ar, "dP", stage, member, NULL);
-    Strs remaining = split_lines(capture_l(o, ar, "t", stage, NULL));
-    if (remaining.n != members.n - 1) fail("rpmalloc normalization did not remove exactly one member from %s", support);
-    for (int i = 0; i < remaining.n; i++) {
-        if (strcmp(trim(remaining.v[i]), member) == 0) fail("rpmalloc member remains in %s", stage);
-    }
-    remove_file(out);
-    rename_path(stage, out);
-    return out;
-}
 
-static char *llvm_link_flags(const Opts *o, const char *config, const char *libdir, const char *support_override) {
-    Buf sb = {0};
-    if (exists(config)) {
-        Strs toks = split_fields(capture_l(o, config, "--link-static", "--libnames", NULL));
-        for (int i = 0; i < toks.n; i++) {
-            const char *tok = toks.v[i];
-            char *f;
-            if (starts_with(tok, "-l")) {
-                f = static_lib(libdir, tok + 2);
-            } else if (ends_with(tok, ".lib") || ends_with(tok, ".a")) {
-                f = is_abs(tok) ? xstrdup(tok) : PJ(libdir, tok);
-                if (!exists(f)) fail("llvm-config requires missing static library %s; provide a complete LLVM_PREFIX", f);
-            } else {
-                continue;
-            }
-            if (*support_override && strcmp(path_base(f), "LLVMSupport.lib") == 0) f = xstrdup(support_override);
-            link_path(&sb, f);
-        }
-    } else if (IS_WIN) {
-        /* COFF linkers rescan archives; some SDKs omit llvm-config. */
-        Strs names = {0};
-        if (!list_dir(libdir, &names)) fail("cannot list LLVM libraries: %s", libdir);
-        for (int i = 0; i < names.n; i++) {
-            const char *name = names.v[i];
-            /* LLVM-C.lib is the DLL import library, not a static LLVM archive. */
-            if (!strcmp(name, "LLVM-C.lib")) continue;
-            if (starts_with(name, "LLVM") && ends_with(name, ".lib")) {
-                char *f = PJ(libdir, name);
-                if (*support_override && !strcmp(name, "LLVMSupport.lib")) f = xstrdup(support_override);
-                link_path(&sb, f);
-            }
-        }
-    } else {
-        fail("%s missing; install llvm-config alongside static libraries", config);
-    }
-    return (char *)buf_cstr(&sb);
-}
 
-static char *external_link_flags(const Opts *o, const char *config, const char *libdir, const char *xml2) {
-    Buf sb = {0};
-    if (exists(config)) {
-        Strs toks = split_fields(capture_l(o, config, "--link-static", "--system-libs", NULL));
-        for (int i = 0; i < toks.n; i++) {
-            const char *tok = toks.v[i];
-            char *base = path_base(tok);
-            if (IS_DARWIN && (!strcmp(tok, "-lzstd") || !strcmp(base, "libzstd.a") || !strcmp(base, "libzstd.dylib"))) {
-                const char *cands[] = {PJ(libdir, "libzstd.a"), "/opt/homebrew/lib/libzstd.a", "/usr/local/lib/libzstd.a", "/opt/local/lib/libzstd.a", NULL};
-                link_path(&sb, external_library("ZSTD_LIBRARY", tok, cands));
-                continue;
-            }
-            if (IS_WIN && (!strcmp(tok, "xml2s.lib") || !strcmp(tok, "libxml2s.lib") || !strcmp(base, "xml2s.lib"))) {
-                const char *cands[] = {PJ(libdir, "xml2s.lib"), PJ(libdir, "libxml2s.lib"), xml2, NULL};
-                link_path(&sb, external_library("XML2_LIBRARY", tok, cands));
-                continue;
-            }
-            if (is_abs(tok)) {
-                if (!exists(tok)) fail("llvm-config requires missing system library %s; install it before running native", tok);
-                link_path(&sb, tok);
-            } else {
-                char *local = PJ(libdir, tok);
-                if (exists(local)) link_path(&sb, local);
-                else buf_addf(&sb, " %s", tok);
-            }
-        }
-    } else if (IS_WIN) {
-        const char *cands[] = {PJ(libdir, "xml2s.lib"), PJ(libdir, "libxml2s.lib"), xml2, NULL};
-        link_path(&sb, external_library("XML2_LIBRARY", "xml2s.lib", cands));
-    }
-    return (char *)buf_cstr(&sb);
-}
 
 /* The pinned Windows LLVM needs libxml2 (its manifest merger) but does not
  * ship it. Build the pinned source like the bridge: the bridge compiler and
@@ -721,6 +605,7 @@ static const char LIBXML2_CONFIG[] = "#define HAVE_DECL_GETENTROPY 0\n#define HA
 /* Bridge flags that only apply to C++. */
 static const char *const LIBXML2_CXX_ONLY[] = {"-std=c++17", "-fno-exceptions", "-fno-rtti", "-fvisibility-inlines-hidden", NULL};
 
+/* Seeded: cxx is the raw cross_clang alias and ar the seed llvm-ar alias. */
 static char *prepare_libxml2(const Opts *o, const char *ndir, const char *cxx, const char *ar, const Strs *flags) {
     Json *pin = jobj(jobj(json_load(PJ(o->root, "toolchain.lock.json")), "linux_release_deps"), "libxml2");
     const char *version = jstr(pin, "version");
@@ -791,7 +676,8 @@ static char *prepare_libxml2(const Opts *o, const char *ndir, const char *cxx, c
     remove_all(objd);
     mkdirs(objd);
     printf("compile libxml2 %s (%d files)\n", version, ncmds);
-    Strs env = base_env(o);
+    Strs env = seed_env(o);
+    mkdirs(PJ(o->root, ".cache", "tmp"));
     Pool pool = {0};
     pool.limit = o->jobs;
     for (int i = 0; i < ncmds; i++) pool_add(&pool, cmds[i].v, NULL, env.v, LIBXML2_SOURCES[i]);
@@ -803,13 +689,14 @@ static char *prepare_libxml2(const Opts *o, const char *ndir, const char *cxx, c
     strs_add(&acmd, "rcs");
     strs_add(&acmd, part);
     for (int i = 0; LIBXML2_SOURCES[i]; i++) strs_add(&acmd, PJ(objd, sfmt("%s.o", LIBXML2_SOURCES[i])));
-    must(o, o->root, &acmd);
+    seed_must(o, o->root, &acmd);
     remove_file(lib);
     rename_path(part, lib);
     write_file(inputs, want);
     printf("libxml2 ready: %s\n", lib);
     return lib;
 }
+
 
 /* ---- seeded Linux host recipe (GNU ABI: the pinned LLVM SDK is libstdc++-built) ----
  * The same argument lists feed the checked recipe files the release pipeline
@@ -919,7 +806,6 @@ static void seeded_tblgen(const Opts *o, const char *dir, const char *tg, const 
 
 /* Unchanged pinned LLVM dependency sources. The only generated C++ is LLVM's
  * own driver template; all dependency orchestration and dispatch remain C. */
-static const char *const DSYMUTIL_SOURCES[] = {"dsymutil.cpp", "BinaryHolder.cpp", "CFBundle.cpp", "DebugMap.cpp", "DwarfLinkerForBinary.cpp", "MachODebugMapParser.cpp", "MachOUtils.cpp", "Reproducer.cpp", "RelocationMap.cpp", "SwiftModule.cpp", NULL};
 
 #include "selfhost_platform.h"
 
@@ -1257,218 +1143,6 @@ static void prepare_version_sources(const Opts *o, const char *ndir, const char 
     }
 }
 
-static void native(Opts *o) {
-    (void)wp_verified;
-    (void)split_quoted;
-    /* Checked-in C++ bridge sources (see deps/llvm-bridge/README.md). */
-    char *bridge_src = PJ(o->root, "deps", "llvm-bridge");
-    if (!is_dir(bridge_src)) fail("LLVM bridge sources missing at %s", bridge_src);
-    Json *nat = jobj(json_load(PJ(o->root, "toolchain.lock.json")), "native");
-    char *ndir = o->native_dir ? xstrdup(o->native_dir) : PJ(o->root, ".cache", "native");
-    if (!is_abs(ndir)) ndir = PJ(o->root, ndir);
-    char *header = NULL;
-    char *llvm = prepare_llvm_sdk(o, ndir, &header);
-    char *objd = PJ(ndir, "obj");
-    mkdirs(objd);
-    static const char *const lib_keys[] = {"clang_libs", "lld_libs", NULL};
-    char *libdir = PJ(llvm, "lib");
-    char *config = PJ(llvm, "bin", sfmt("llvm-config%s", EXE_SUFFIX));
-    char *ar = PJ(llvm, "bin", sfmt("llvm-ar%s", EXE_SUFFIX));
-    if (!exists(ar)) {
-        if (IS_WIN) fail("%s missing; Windows native setup requires the SDK's llvm-ar", ar);
-        ar = xstrdup("ar");
-    }
-    char *support_override = xstrdup("");
-    if (IS_WIN) support_override = normalize_windows_support(o, ar, static_lib(libdir, "LLVMSupport"), ndir);
-    char *llvm_flags = llvm_link_flags(o, config, libdir, support_override);
-    char *cxx = xstrdup(env_get("CXX"));
-    if (!*cxx) {
-        cxx = xstrdup("clang++");
-        char *pinned_cxx = PJ(llvm, "bin", sfmt("clang++%s", EXE_SUFFIX));
-        if (o->pinned && exists(pinned_cxx)) cxx = pinned_cxx;
-        if (IS_WIN && exists(PJ(llvm, "bin", "clang++.exe"))) cxx = PJ(llvm, "bin", "clang++.exe");
-    }
-    Strs flags = {0};
-    /* Build-only reproducibility: virtual names for our root and the LLVM SDK headers
-     * (assertions, __FILE__, __PRETTY_FUNCTION__). Last match wins, so the specific map
-     * comes after the root map. -ffile-prefix-map implies -ffile-reproducible (clang).
-     * Skipped for MSVC-style drivers, which do not take it. */
-    char *cxx_base = lower(path_stem(cxx));
-    if (strcmp(cxx_base, "cl") && strcmp(cxx_base, "clang-cl")) {
-        strs_addf(&flags, "-ffile-prefix-map=%s=/cross_cc", o->root);
-        strs_addf(&flags, "-ffile-prefix-map=%s=/cross_cc_llvm/include", PJ(llvm, "include"));
-        /* COFF .debug$S otherwise records the absolute object output path. */
-        if (IS_WIN) strs_add(&flags, "-mno-incremental-linker-compatible");
-    }
-    static const char *const common[] = {"-std=c++17", "-O2", "-w", "-c", "-ffunction-sections", "-fdata-sections", "-fno-exceptions", "-fno-rtti", "-fno-stack-protector", "-fvisibility-inlines-hidden", "-D__STDC_CONSTANT_MACROS", "-D__STDC_FORMAT_MACROS", "-D__STDC_LIMIT_MACROS", "-DLLVM_BUILD_STATIC", "-DCLANG_BUILD_STATIC", NULL};
-    strs_addv(&flags, common);
-    if (IS_WIN) {
-        static const char *const w[] = {"-D_CRT_SECURE_NO_WARNINGS", "-D_SCL_SECURE_NO_WARNINGS", "-D_ITERATOR_DEBUG_LEVEL=0", "-D_MT", "-fms-runtime-lib=static", NULL};
-        strs_addv(&flags, w);
-    } else {
-        strs_add(&flags, "-fPIC");
-        if (IS_LINUX) strs_add(&flags, "-D_GNU_SOURCE");
-        if (IS_DARWIN) {
-            char *sdk = xstrdup(env_get("SDKROOT"));
-            if (!*sdk) sdk = capture_l(o, "xcrun", "--show-sdk-path", NULL);
-            strs_add(&flags, "-isysroot");
-            strs_add(&flags, sdk);
-        }
-    }
-    char *external_flags = xstrdup("");
-    /* Linux uses the pinned system_libs list below, not llvm-config's host paths. */
-    if (IS_WIN) {
-        char *xml2 = xstrdup("");
-        if (!*env_get("XML2_LIBRARY") && !exists(PJ(libdir, "xml2s.lib")) && !exists(PJ(libdir, "libxml2s.lib"))) xml2 = prepare_libxml2(o, ndir, cxx, ar, &flags);
-        external_flags = external_link_flags(o, config, libdir, xml2);
-    } else if (!IS_LINUX) {
-        external_flags = external_link_flags(o, config, libdir, "");
-    }
-    /* Official clang Version.cpp from the pinned upstream archive (unmodified, empty
-     * VCSVersion.inc like a release build without VCS info), compiled with the
-     * bridge's flags. It is linked as a plain object, not an archive member: a
-     * linker group would otherwise pull clang's own Version.o (embedding
-     * repository/hash strings) from libclangBasic first. */
-    Json *crt = json_load(PJ(o->root, "compiler-rt.lock.json"));
-    const char *crt_url = jstr(crt, "url");
-    char *crt_archive = PJ(o->root, ".cache", "downloads", last_segment(crt_url));
-    char *path_object = xstrdup("");
-    if (IS_WIN) {
-        fetch(crt_url, jstr(crt, "sha256"), crt_archive);
-        char *pdir = PJ(ndir, "windows-path");
-        remove_all(pdir); /* owned native build inputs, never the supplied SDK */
-        char *source, *gen;
-        wp_prepare(crt_archive, jstr(crt, "sha256"), jstr(crt, "strip_prefix"), pdir, &source, &gen);
-        path_object = PJ(objd, "llvm-WindowsPath.cpp.o");
-        Strs pc = {0};
-        strs_add(&pc, cxx);
-        strs_cat(&pc, &flags);
-        strs_addv(&pc, wp_flags);
-        strs_addf(&pc, "-I%s", gen);
-        strs_addf(&pc, "-I%s", PJ(llvm, "include"));
-        wp_prefix_flags(pdir, &pc);
-        strs_add(&pc, "-o");
-        strs_add(&pc, path_object);
-        strs_add(&pc, "Path.cpp");
-        wp_rooted_args(pc.v, pc.n, o->root);
-        Buf record = {0};
-        buf_addf(&record, "compile-cwd %s\n", path_dir(source));
-        for (int i = 0; i < pc.n; i++) buf_addf(&record, "compile-arg %s\n", pc.v[i]);
-        write_file(PJ(pdir, "compile.txt"), buf_cstr(&record));
-        must(o, path_dir(source), &pc);
-    }
-    prepare_version_sources(o, ndir, header);
-    char *vdir = PJ(ndir, "version");
-    char *vsrc = PJ(vdir, "clang", "lib", "Basic", "Version.cpp"), *vgen = PJ(vdir, "gen");
-    char *lsrc = PJ(vdir, "lld", "Common", "Version.cpp"), *lgen = PJ(vdir, "lld-gen");
-    Json *srcs = jarr_opt(nat, "sources");
-    /* Rebuild bridge members: changing CXX or LLVM_PREFIX must not reuse stale objects. */
-    Strs names_all = {0}, srcs_all = {0};
-    strs_add(&names_all, "clang-Version.cpp");
-    strs_add(&srcs_all, vsrc);
-    strs_add(&names_all, "lld-Version.cpp");
-    strs_add(&srcs_all, lsrc);
-    for (int i = 0; srcs && i < srcs->n; i++) {
-        strs_add(&names_all, srcs->items[i]->str);
-        strs_add(&srcs_all, PJ(bridge_src, srcs->items[i]->str));
-    }
-    char *ddir = prepare_dsymutil(o, ndir, llvm, cxx, external_flags, support_override, &flags, NULL);
-    char *dsrc = PJ(ddir, "llvm", "tools", "dsymutil");
-    for (int i = 0; DSYMUTIL_SOURCES[i]; i++) {
-        const char *name = DSYMUTIL_SOURCES[i];
-        strs_addf(&names_all, "dsymutil-%s", name);
-        strs_add(&srcs_all, !strcmp(name, "CFBundle.cpp") ? PJ(ddir, "gen", name) : PJ(dsrc, name));
-    }
-    strs_add(&names_all, "dsymutil-driver.cpp");
-    strs_add(&srcs_all, PJ(ddir, "gen", "driver.cpp"));
-    Strs objs = {0};
-    Strs env = base_env(o);
-    Pool pool = {0};
-    pool.limit = o->jobs;
-    for (int i = 0; i < names_all.n; i++) {
-        const char *name = names_all.v[i];
-        char *out = PJ(objd, sfmt("%s.o", name));
-        strs_add(&objs, out);
-        printf("compile %s\n", name);
-        Strs cmd = {0};
-        strs_add(&cmd, cxx);
-        strs_cat(&cmd, &flags);
-        if (i == 1) strs_addf(&cmd, "-I%s", lgen);
-        strs_addf(&cmd, "-I%s", PJ(llvm, "include"));
-        strs_addf(&cmd, "-I%s", bridge_src);
-        if (i == 0) strs_addf(&cmd, "-I%s", vgen);
-        int is_dsym = starts_with(name, "dsymutil-");
-        if (is_dsym) {
-            strs_addf(&cmd, "-I%s", PJ(ddir, "gen"));
-            strs_addf(&cmd, "-I%s", dsrc);
-        }
-        if (!strcmp(name, "dsymutil-CFBundle.cpp")) strs_add(&cmd, "-DCROSS_CC_DSYMUTIL_PORTABLE_BUNDLE");
-        /* The bridge's extern "C" cross_cc_dsymutil_main wraps this entry point. */
-        if (!strcmp(name, "dsymutil-driver.cpp")) strs_add(&cmd, "-Dmain=cross_cc_dsymutil_driver_main");
-        strs_add(&cmd, "-o");
-        strs_addf(&cmd, "%s.part", out);
-        strs_add(&cmd, srcs_all.v[i]);
-        if (is_dsym) {
-            Buf record = {0};
-            buf_addf(&record, "source %s %s\n", sha256_file(srcs_all.v[i]), srcs_all.v[i]);
-            for (int a = 0; a < cmd.n; a++) buf_addf(&record, "compile-arg %s\n", cmd.v[a]);
-            write_file(PJ(ddir, sfmt("%s.recipe.txt", name)), buf_cstr(&record));
-        }
-        pool_add(&pool, cmd.v, NULL, env.v, name);
-    }
-    pool_drain(&pool);
-    for (int i = 0; i < objs.n; i++) {
-        remove_file(objs.v[i]);
-        rename_path(sfmt("%s.part", objs.v[i]), objs.v[i]);
-    }
-    char *lib = PJ(ndir, "libcross_cc_backend.a");
-    char *part = sfmt("%s.tmp.a", lib);
-    remove_file(part);
-    Strs acmd = {0};
-    strs_add(&acmd, ar);
-    strs_add(&acmd, "rcs");
-    strs_add(&acmd, part);
-    for (int i = 2; i < objs.n; i++) strs_add(&acmd, objs.v[i]);
-    must(o, o->root, &acmd);
-    remove_file(lib);
-    rename_path(part, lib);
-
-    Buf sb = {0};
-    if (IS_LINUX) buf_str(&sb, "-Wl,--gc-sections");
-    link_path(&sb, objs.v[0]);
-    link_path(&sb, objs.v[1]);
-    /* A plain object must win over LLVMSupport's native-backslash Path member. */
-    if (*path_object) link_path(&sb, path_object);
-    if (IS_LINUX) buf_str(&sb, " -Wl,--start-group");
-    link_path(&sb, lib);
-    for (int k = 0; lib_keys[k]; k++) {
-        Json *arr = jarr_opt(nat, lib_keys[k]);
-        for (int i = 0; arr && i < arr->n; i++) link_path(&sb, static_lib(libdir, arr->items[i]->str));
-    }
-    buf_str(&sb, llvm_flags);
-    if (IS_LINUX) {
-        buf_str(&sb, " -Wl,--end-group");
-        /* Existing pinned Linux release's external compression/XML dependencies. */
-        Json *sys = jarr_opt(nat, "system_libs");
-        for (int i = 0; sys && i < sys->n; i++) buf_addf(&sb, " %s", sys->items[i]->str);
-    } else if (IS_DARWIN) {
-        buf_str(&sb, " -lc++");
-        buf_str(&sb, external_flags);
-        /* Official macOS archives contain LLVM 22 bitcode; Apple's bundled
-         * LLVM 17 LTO plugin cannot read it. Use the matching shipped plugin. */
-        char *lto = PJ(libdir, "libLTO.dylib");
-        if (exists(lto)) buf_addf(&sb, " \"-Wl,-lto_library,%s\" -Wl,-mllvm,-threads=%d", lto, o->jobs);
-    } else if (IS_WIN) {
-        buf_str(&sb, " kernel32.lib user32.lib advapi32.lib shell32.lib ole32.lib oleaut32.lib uuid.lib ws2_32.lib version.lib psapi.lib bcrypt.lib ntdll.lib delayimp.lib libcmt.lib libcpmt.lib oldnames.lib");
-        buf_str(&sb, external_flags);
-    }
-    buf_str(&sb, "\n");
-    char *ff = PJ(ndir, "linker-flags.txt");
-    write_file(ff, buf_cstr(&sb));
-    if (*path_object) wp_receipt(PJ(ndir, "windows-path"), path_object, ff);
-    printf("native backend ready: %s\nlinker flags: %s\n", lib, ff);
-    if (!o->native_dir) printf("Now run: tools/build build\n");
-}
 
 /* ---- seeded preparation and the release pipeline ---- */
 static char *root_rel(const Opts *o, const char *p) {
@@ -1563,7 +1237,7 @@ static void host_llvm_libs(const Opts *o, Strs *a, const char *llvm) {
 
 static char *selfhost_config(const Opts *o) { return o->host_config ? abs_path(o->host_config) : PJ(o->root, ".cache", "native", "selfhost.json"); }
 
-static void write_selfhost(const Opts *o, SelfhostCfg *c, const char *zstd) {
+static void write_selfhost(const Opts *o, SelfhostCfg *c, const char *zstd, const char *xml2) {
     const SelfhostHost *h = c->h;
     char *rdir = PJ(c->native, "selfhost");
     mkdirs(rdir);
@@ -1576,7 +1250,8 @@ static void write_selfhost(const Opts *o, SelfhostCfg *c, const char *zstd) {
     char *syslibs = "";
     if (!strcmp(h->kind, "linux")) strs_add(&link, "-Wl,--end-group");
     else syslibs = capture_l(o, PJ(c->llvm, "bin", sfmt("llvm-config%s", EXE_SUFFIX)), "--link-static", "--system-libs", NULL);
-    sp_link_tail(h, &link, syslibs, zstd);
+    sp_link_tail(h, &link, syslibs, zstd, xml2);
+    if (!strcmp(h->kind, "apple") && is_file(PJ(c->llvm, "lib", "libLTO.dylib"))) strs_add(&link, "-Wl,-lto_library,{llvm}/lib/libLTO.dylib");
     char *link_file = PJ(rdir, "link.args");
     write_lines(link_file, &link);
     c->bridge_args = bridge_file;
@@ -1595,6 +1270,19 @@ static void write_selfhost(const Opts *o, SelfhostCfg *c, const char *zstd) {
     json_field(&j, "native-dir", root_rel(o, c->native), 1);
     buf_str(&j, "}\n");
     write_file(selfhost_config(o), buf_cstr(&j));
+}
+
+/* The pinned Windows LLVM needs libxml2 but ships none: build the pinned
+ * source static (/MT) with the raw seed cross_clang and the host bridge flags. */
+static char *msvc_libxml2(const Opts *o, const SelfhostCfg *c) {
+    Strs flags = {0};
+    static const char *const base[] = {"--no-default-config", "-O2", "-w", "-c", "-ffunction-sections", "-fdata-sections", NULL};
+    strs_addv(&flags, base);
+    strs_addf(&flags, "--target=%s", c->h->clang_target);
+    strs_addf(&flags, "%s=%s", c->h->cpu_flag, c->cpu);
+    Strs b = sp_bridge_args(c->h);
+    for (int i = 0; i < b.n; i++) strs_add(&flags, sp_expand(b.v[i], o->seed_root, c->sdk, c->llvm, c->native));
+    return prepare_libxml2(o, c->native, seed_alias(o, "cross_clang"), seed_alias(o, "llvm-ar"), &flags);
 }
 
 /* System Apple SDK: --sdk, SDKROOT, else xcrun's (a locator, not a compiler). */
@@ -1680,7 +1368,9 @@ static void prepare(Opts *o) {
                 zstd = PJ(abs_path(o->deps_prefix), "lib", "libzstd.a");
                 if (!is_file(zstd)) fail("--deps-prefix lacks %s", zstd);
             }
-            write_selfhost(o, &c, zstd);
+            char *xml2 = NULL;
+            if (!strcmp(c.h->kind, "msvc")) xml2 = msvc_libxml2(o, &c);
+            write_selfhost(o, &c, zstd, xml2);
         }
     }
     /* Identity of every input of the generated native-dir sources. */
@@ -1701,7 +1391,7 @@ static void prepare(Opts *o) {
         prepare_version_sources(o, ndir, header);
         prepare_dsymutil(o, ndir, c.llvm, NULL, "", "", NULL, &c);
     }
-    if (c.auto_linux) write_selfhost(o, &c, NULL);
+    if (c.auto_linux) write_selfhost(o, &c, NULL, NULL);
     mkdirs(PJ(ndir, "selfhost"));
     write_file(stamp, want);
     printf("host prepared%s: %s\n", fresh ? " (verified existing)" : "", selfhost_config(o));
@@ -1812,8 +1502,7 @@ int main(int argc, char **argv) {
         else if (starts_with(a, "--deps-prefix=")) o.deps_prefix = xstrdup(a + 14);
         else if (starts_with(a, "--host-config=")) o.host_config = xstrdup(a + 14);
         else if (starts_with(a, "--jobs=")) {
-            o.jobs = parse_jobs(a + 7);
-            if (is_release) strs_add(&o.forward, a);
+            o.jobs = parse_jobs(a + 7); /* local preparation only; release.c has no --jobs */
         } else if (is_release) strs_add(&o.forward, a);
         else if (starts_with(a, "--profile=")) {
             o.profile = xstrdup(a + 10);
@@ -1838,7 +1527,7 @@ int main(int argc, char **argv) {
     else if (!strcmp(cmd, "prepare")) prepare(&o);
     else if (!strcmp(cmd, "build")) build(&o);
     else if (!strcmp(cmd, "release")) release_all(&o);
-    else if (!strcmp(cmd, "native")) native(&o);
+    else if (!strcmp(cmd, "native")) build(&o); /* compatibility alias */
     else if (!strcmp(cmd, "test")) test(&o);
     else if (!strcmp(cmd, "package")) package_dist(&o);
     else if (!strcmp(cmd, "tools")) tools_cmd(&o, 0);
