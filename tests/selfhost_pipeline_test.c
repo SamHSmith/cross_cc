@@ -23,14 +23,43 @@ static void put(const char *path, const char *text) {
     write_file(path, text);
 }
 
+/* Compare filesystem path spellings: on Windows '\\' and '/' are the same
+ * separator, repeated separators collapse and case is insignificant. Elsewhere
+ * paths compare exactly. `windows` is a parameter so Linux can test the rule. */
+static char *fs_path_key(const char *p, int windows) {
+    char *k = xstrdup(p);
+    size_t n = 0;
+    for (size_t i = 0; p[i]; i++) {
+        char c = p[i];
+        if (windows) {
+            if (c == '\\') c = '/';
+            else if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+            if (c == '/' && n && k[n - 1] == '/') continue;
+        }
+        k[n++] = c;
+    }
+    if (windows) while (n > 1 && k[n - 1] == '/') n--;
+    k[n] = 0;
+    return k;
+}
+static int same_path_rule(const char *a, const char *b, int windows) {
+    return !strcmp(fs_path_key(a, windows), fs_path_key(b, windows));
+}
+#ifdef _WIN32
+#define same_fs_path(a, b) same_path_rule((a), (b), 1)
+#else
+#define same_fs_path(a, b) same_path_rule((a), (b), 0)
+#endif
+
 #define MOCK_LLVM_ARCHIVE "mock LLVM source archive\n"
 static void mock_wp_prepare(const char *archive, const char *expected, const char *strip_prefix, const char *dir, char **source, char **gen) {
     const char *root = env_get("SELFHOST_MOCK_ROOT");
     /* Assert the acquisition call is bound to the fixture's cached input. No
      * real source hash or authentication function is substituted globally. */
-    if (strcmp(archive, PJ(root, ".cache", "downloads", "mock-llvm.tar")) ||
-        strcmp(expected, sha256_bytes(MOCK_LLVM_ARCHIVE, strlen(MOCK_LLVM_ARCHIVE))) ||
-        strcmp(sha256_file(archive), expected) || strcmp(strip_prefix, "mock-llvm")) fail("unexpected mock LLVM acquisition inputs");
+    if (!same_fs_path(archive, PJ(root, ".cache", "downloads", "mock-llvm.tar"))) fail("unexpected mock LLVM archive path: %s (expected under %s)", archive, root);
+    if (strcmp(expected, sha256_bytes(MOCK_LLVM_ARCHIVE, strlen(MOCK_LLVM_ARCHIVE)))) fail("unexpected mock LLVM expected hash: %s", expected);
+    if (strcmp(sha256_file(archive), expected)) fail("mock LLVM archive content hash differs from expected %s", expected);
+    if (strcmp(strip_prefix, "mock-llvm")) fail("unexpected mock LLVM strip prefix: %s", strip_prefix);
     if (exists(dir)) fail("input stage already exists: %s", dir);
     *source = PJ(dir, "llvm", "lib", "Support", "Path.cpp");
     *gen = PJ(dir, "gen");
@@ -287,6 +316,11 @@ int main(int argc, char **argv) {
         return mock_compiler(argc, argv);
     }
     tool_name = "selfhost_pipeline_test";
+    /* Windows spelling rules (checked on every host) and exact POSIX rules. */
+    CHECK(same_path_rule("C:\\Work\\.cache\\downloads\\mock-llvm.tar", "c:/work/.cache//downloads/mock-llvm.tar", 1));
+    CHECK(!same_path_rule("C:\\Work\\.cache\\downloads\\other.tar", "C:/Work/.cache/downloads/mock-llvm.tar", 1));
+    CHECK(!same_path_rule("/a/b", "/A/b", 0));
+    CHECK(!same_path_rule("a\\b", "a/b", 0));
     char *self = abs_path(argv[0]);
     char *base = abs_path(sfmt("build/tests/selfhost-fixture-%lu", (unsigned long)(size_t)&failures));
     CHECK(!strcmp(default_options().linux_glibc, "2.34"));
