@@ -614,7 +614,7 @@ static void test_msvc_managed_sdk_stage(void) {
         twrite(path_join(dir, "nested.lib", "crt.o"), "object");
         twrite(path_join(dir, "nested.lib", "header.h"), "not a linker input");
 #ifndef _WIN32
-        CHECK(symlink("same.lib", path_join(dir, "SAME.lib")) == 0);
+        CHECK(symlink("same.lib", path_join(dir, "linked.lib")) == 0);
 #endif
         sv_push(&flags, str_fmt("-Wl,-libpath:%s", dir));
     }
@@ -637,7 +637,7 @@ static void test_msvc_managed_sdk_stage(void) {
             const char *present[] = {"libcpmt.lib", "upper.LIB", "crt.obj"};
             for (size_t k = 0; k < 3; k++) CHECK(is_file(path_join(alias, present[k])), "%s", present[k]);
 #ifndef _WIN32
-            CHECK(is_file(path_join(alias, "SAME.lib")));
+            CHECK(is_file(path_join(alias, "linked.lib")));
 #endif
             CHECK(!file_exists(path_join(alias, "receipt.txt")));
             CHECK(is_file(path_join(alias, "nested.lib", "autolink.lib")));
