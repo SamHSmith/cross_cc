@@ -1,0 +1,234 @@
+/* Offline pipeline regression: this executable also acts as a deterministic
+ * mock cross_cc seed, raw Clang/ar aliases, and packaging helper. No SDK/network
+ * or production system compiler is used. Compile the TEST HARNESS with cc:
+ * cc -std=c11 -O0 -o build/tests/selfhost_pipeline_test tests/selfhost_pipeline_test.c
+ */
+#define main cross_cc_release_main
+#include "../tools/release.c"
+#undef main
+
+static int failures;
+#define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); failures++; } } while (0)
+
+static void put(const char *path, const char *text) {
+    mkdirs(path_dir(path));
+    write_file(path, text);
+}
+static const char *argument(int argc, char **argv, const char *key) {
+    for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], key)) return argv[i + 1];
+    return "";
+}
+static int has_argument(int argc, char **argv, const char *key) {
+    for (int i = 1; i < argc; i++) if (!strcmp(argv[i], key)) return 1;
+    return 0;
+}
+
+static int mock_package(int argc, char **argv) {
+    const char *output = "", *binary = "";
+    for (int i = 1; i < argc; i++) {
+        if (starts_with(argv[i], "--output=")) output = argv[i] + 9;
+        if (starts_with(argv[i], "--binary=")) binary = argv[i] + 9;
+    }
+    if (!*output || !*binary) fail("mock package missing arguments");
+    mkdirs(output);
+    copy_file(PJ(output, "cross_cc"), binary);
+    put(PJ(output, "lib", "fixture.h"), "mock resources\n");
+    return 0;
+}
+
+static int mock_compiler(int argc, char **argv) {
+    const char *root = env_get("SELFHOST_MOCK_ROOT");
+    const char *name = path_base(argv[0]);
+    int ar = !strcmp(name, "llvm-ar" EXE_SUFFIX);
+    int compile = has_argument(argc, argv, "-c");
+    const char *out = ar ? (argc > 2 ? argv[2] : "") : argument(argc, argv, "-o");
+    if (!*out) fail("mock compiler missing output");
+    int seed_stage = contains(out, "/host-stage1.stage/");
+    const char *expected = seed_stage ? PJ(root, "seed") : root;
+    if (strcmp(env_get("CROSS_CC_ROOT"), expected)) fail("mock resource isolation: expected %s, got %s", expected, env_get("CROSS_CC_ROOT"));
+    FILE *log = fopen(PJ(root, "commands.log"), "ab");
+    if (!log) fail("mock log");
+    fprintf(log, "%s %s %s resource-root=%s\n", seed_stage ? "seed" : "current", ar ? "ar" : compile ? "compile" : "link", out, expected);
+    if (compile) {
+        const char *last_opt = "";
+        for (int i = 1; i < argc; i++) if (starts_with(argv[i], "-O")) last_opt = argv[i];
+        int debug = !strcmp(env_get("SELFHOST_PROFILE"), "debug");
+        if (strcmp(last_opt, debug ? "-O0" : "-O2")) fail("wrong compile profile for %s: %s", out, last_opt);
+        if (debug && (!has_argument(argc, argv, "-g") || has_argument(argc, argv, "-DNDEBUG"))) fail("debug flags missing/contradictory");
+        int cpp = !strcmp(name, "cross_clang" EXE_SUFFIX);
+        fprintf(log, "%s-profile %s\n", cpp ? "c++" : "c", last_opt);
+        Buf object = {0};
+        for (int i = 1; i < argc; i++) {
+            if (!strcmp(argv[i], "-o")) { i++; continue; }
+            buf_addf(&object, "%s\n", argv[i]);
+        }
+        /* Changing only one C++ object must fail even if the mock link produces
+         * identical executable bytes. The second pass uses the same paths. */
+        if (*env_get("SELFHOST_FAIL_FRESH") && !seed_stage && cpp && ends_with(out, "bridge.cpp.o") && exists(out)) buf_str(&object, "nonrepeatable C++ object\n");
+        write_file(out, buf_cstr(&object));
+    } else if (ar) {
+        Buf archive = {0};
+        for (int i = 3; i < argc; i++) buf_str(&archive, read_file(argv[i], NULL));
+        write_file(out, buf_cstr(&archive));
+    } else {
+        /* This is a copy, not an in-place write of any executing alias. */
+        if (exists(out)) fail("link output was not unlinked before rebuild");
+        copy_file(out, argv[0]);
+        make_executable(out);
+    }
+    fclose(log);
+    return 0;
+}
+
+static char *fixture(const char *base, const char *label, const char *self) {
+    char *root = PJ(base, label);
+    if (exists(root)) fail("fixture already exists %s", root);
+    mkdirs(PJ(root, "tools"));
+    copy_file(PJ(root, "tools", "release" EXE_SUFFIX), self);
+    copy_file(PJ(root, "tools", "build" EXE_SUFFIX), self);
+    mkdirs(PJ(root, "seed", "bin"));
+    copy_file(PJ(root, "seed", "bin", "cross_cc" EXE_SUFFIX), self);
+    mkdirs(PJ(root, "seed", "lib", "include"));
+    mkdirs(PJ(root, "seed", "lib", "libc"));
+    put(PJ(root, "seed", "upstream.lock.json"), "{}\n");
+    put(PJ(root, "toolchain.lock.json"), "{\"native\":{\"sources\":[\"bridge.cpp\"]}}\n");
+    put(PJ(root, "upstream.lock.json"), "{}\n");
+    put(PJ(root, "main.c"), "mock driver\n");
+    put(PJ(root, "src", "driver.h"), "mock header\n");
+    const char *tools[] = {"release.c", "build.c", "common.h", "linux-release-deps.c", "macos-x64-llvm.c", NULL};
+    for (int i = 0; tools[i]; i++) put(PJ(root, "tools", tools[i]), "mock provenance input\n");
+    put(PJ(root, "deps", "llvm-bridge", "bridge.cpp"), "mock bridge\n");
+    put(PJ(root, "llvm", "include", "llvm", "Config", "llvm-config.h"), "#define LLVM_VERSION_MAJOR 22\n#define LLVM_VERSION_MINOR 1\n#define LLVM_VERSION_PATCH 8\n");
+    mkdirs(PJ(root, "llvm", "lib"));
+    const char *native = PJ(root, "native");
+    put(PJ(native, "version", "clang", "lib", "Basic", "Version.cpp"), "mock clang version\n");
+    put(PJ(native, "version", "lld", "Common", "Version.cpp"), "mock lld version\n");
+    put(PJ(native, "version", "lld-gen", "lld", "Common", "Version.inc"), "mock lld version include\n");
+    put(PJ(native, "version", "lld-gen", "llvm", "Support", "VCSRevision.h"), "");
+    put(PJ(native, "version", "lld-gen", "VCSVersion.inc"), "");
+    const char *d = PJ(native, "dsymutil");
+    put(PJ(d, "inputs.txt"), "mock pinned source receipt\n");
+    put(PJ(d, "gen", "Options.inc"), "mock options\n");
+    put(PJ(d, "gen", "llvm", "Config", "config.h"), "mock config\n");
+    put(PJ(d, "gen", "CFBundle.cpp"), "mock bundle\n");
+    put(PJ(d, "gen", "driver.cpp"), "mock driver\n");
+    for (int i = 0; DSYM_FILES[i]; i++) put(PJ(d, "llvm", "tools", "dsymutil", DSYM_FILES[i]), "mock dsymutil\n");
+    /* Deliberately no native/libcross_cc_backend.a or linker-flags.txt. */
+    put(PJ(root, "recipes", "bridge.args"), "-O3\n-fPIC\n");
+    put(PJ(root, "recipes", "link.args"), "{object}\n{version}\n{lld_version}\n{bridge}\n");
+    put(PJ(root, "config", "host.json"), sfmt("{\"target\":\"%s\",\"llvm-prefix\":\"llvm\",\"native-dir\":\"native\",\"bridge-args\":\"recipes/bridge.args\",\"link-args\":\"recipes/link.args\",\"linux-glibc\":\"2.34\"}\n", host()));
+    return root;
+}
+
+static int invoke(const char *root, const char *profile, const char *bad, const Strs *extra, char **output) {
+    Strs args = {0};
+    strs_add(&args, PJ(root, "tools", "release" EXE_SUFFIX));
+    strs_addf(&args, "--compiler=%s", PJ(root, "seed", "bin", "cross_cc" EXE_SUFFIX));
+    strs_addf(&args, "--host-config=%s", PJ(root, "config", "host.json"));
+    strs_addf(&args, "--profile=%s", profile);
+    if (extra) strs_cat(&args, extra);
+    const char *drop[] = {"CROSS_CC_SEED_ROOT", "SELFHOST_FAIL_FRESH", "SELFHOST_MOCK_ROOT", "SELFHOST_PROFILE", "CROSS_CC_ROOT", "CC", "CXX", NULL};
+    Strs additions = {0};
+    strs_addf(&additions, "SELFHOST_MOCK_ROOT=%s", root);
+    strs_addf(&additions, "SELFHOST_PROFILE=%s", profile);
+    strs_addf(&additions, "SELFHOST_FAIL_FRESH=%s", bad);
+    strs_add(&additions, "CROSS_CC_ROOT=/poisoned-parent-root");
+    strs_add(&additions, "CC=__forbidden_system_cc__");
+    strs_add(&additions, "CXX=__forbidden_system_cxx__");
+    Strs env = make_env(drop, &additions);
+    return run_capture(args.v, root, env.v, output);
+}
+
+static void native_test(const char *base, const char *self, const char *profile, int bad) {
+    char *root = fixture(base, bad ? "nonrepeatable" : profile, self);
+    char *binary = PJ(root, "bin", "cross_cc" EXE_SUFFIX);
+    Strs extra = {0};
+    strs_addf(&extra, "--build-only=%s", binary);
+    char *out = NULL;
+    int code = invoke(root, profile, bad ? "1" : "", &extra, &out);
+    if (bad) {
+        CHECK(code != 0);
+        CHECK(!exists(binary));
+        CHECK(!exists(sfmt("%s.build-manifest.txt", binary)));
+        CHECK(exists(PJ(root, "build", "release", "host-stage1.stage")));
+    } else {
+        CHECK(code == 0);
+        if (code) fprintf(stderr, "%s\n", out);
+        CHECK(is_file(binary));
+        char *receipt = read_file(sfmt("%s.build-manifest.txt", binary), NULL);
+        CHECK(contains(receipt, "verification native stage2/stage3 convergence"));
+        CHECK(contains(receipt, "artifact "));
+        CHECK(contains(receipt, "bridge.cpp.o"));
+        CHECK(contains(receipt, "prebuilt-bridge false"));
+        CHECK(contains(receipt, "host-stage1 seed-resource-lock "));
+        CHECK(contains(receipt, "host-stage1 bridge-source "));
+        CHECK(!exists(PJ(root, "dist")));
+        CHECK(!exists(PJ(root, "build", "release", "host-stage1.stage")));
+        char *log = read_file(PJ(root, "commands.log"), NULL);
+        CHECK(contains(log, "seed compile"));
+        CHECK(contains(log, "current compile"));
+        CHECK(contains(log, !strcmp(profile, "debug") ? "c++-profile -O0" : "c++-profile -O2"));
+        CHECK(contains(log, !strcmp(profile, "debug") ? "c-profile -O0" : "c-profile -O2"));
+        /* Existing normal-build output may be atomically replaced on rebuild. */
+        CHECK(invoke(root, profile, "", &extra, &out) == 0);
+        Strs replace_seed = {0};
+        strs_addf(&replace_seed, "--build-only=%s", PJ(root, "seed", "bin", "cross_cc" EXE_SUFFIX));
+        CHECK(invoke(root, profile, "", &replace_seed, &out) == 0);
+    }
+}
+
+static void cross_and_matrix_test(const char *base, const char *self) {
+    char *root = fixture(base, "cross", self);
+    /* Exercise a non-host target without executing it, including the fourth
+     * advertised target darwin-amd64 previously excluded from matrix parsing. */
+    const char *target = !strcmp(host(), "darwin-amd64") ? "linux-amd64" : "darwin-amd64";
+    Strs extra = {0};
+    strs_addf(&extra, "--target=%s", target);
+    strs_add(&extra, "--llvm-prefix=llvm");
+    strs_add(&extra, "--bridge-args=recipes/bridge.args");
+    strs_add(&extra, "--link-args=recipes/link.args");
+    strs_add(&extra, "--native-dir=native");
+    strs_add(&extra, "--output=dist/cross");
+    char *out = NULL;
+    CHECK(invoke(root, "release", "", &extra, &out) == 0);
+    char *receipt = read_file(PJ(root, "dist", "cross.build-manifest.txt"), NULL);
+    CHECK(contains(receipt, "cross same-input repeatability using stage1; target not executed; NOT native convergence"));
+    CHECK(exists(PJ(root, "dist", "cross.zip")));
+    CHECK(exists(PJ(root, "dist", "cross.zip.sha256")));
+    Opts common = default_options(), targets[4];
+    common.root = root;
+    char *matrix = PJ(root, "matrix.json");
+    put(matrix, "{\"targets\":[{\"target\":\"linux-amd64\"},{\"target\":\"darwin-arm64\"},{\"target\":\"darwin-amd64\"},{\"target\":\"windows-amd64\"}]}\n");
+    CHECK(matrix_targets(&common, matrix, targets) == 4);
+    CHECK(!strcmp(targets[2].target, "darwin-amd64"));
+    put(matrix, "{\"targets\":[{\"target\":\"darwin-amd64\"}]}\n");
+    CHECK(matrix_targets(&common, matrix, targets) == 1);
+    put(matrix, sfmt("{\"targets\":[{\"target\":\"%s\",\"llvm-prefix\":\"llvm\",\"native-dir\":\"native\",\"bridge-args\":\"recipes/bridge.args\",\"link-args\":\"recipes/link.args\",\"output\":\"dist/matrix\"}]}\n", target));
+    Strs matrix_args = {0};
+    strs_addf(&matrix_args, "--matrix=%s", matrix);
+    CHECK(invoke(root, "release", "", &matrix_args, &out) == 0);
+    CHECK(exists(PJ(root, "dist", "matrix.zip")));
+    put(matrix, "{\"targets\":[{\"target\":\"linux-amd64\"},{\"target\":\"linux-amd64\"}]}\n");
+    CHECK(invoke(root, "release", "", &matrix_args, &out) != 0);
+}
+
+int main(int argc, char **argv) {
+    if (*env_get("SELFHOST_MOCK_ROOT")) {
+        const char *name = path_base(argv[0]);
+        if (!strcmp(name, "release" EXE_SUFFIX)) return cross_cc_release_main(argc, argv);
+        if (!strcmp(name, "build" EXE_SUFFIX)) return mock_package(argc, argv);
+        return mock_compiler(argc, argv);
+    }
+    tool_name = "selfhost_pipeline_test";
+    char *self = abs_path(argv[0]);
+    char *base = abs_path(sfmt("build/tests/selfhost-fixture-%lu", (unsigned long)(size_t)&failures));
+    CHECK(!strcmp(default_options().linux_glibc, "2.34"));
+    native_test(base, self, "debug", 0);
+    native_test(base, self, "release", 0);
+    native_test(base, self, "release", 1);
+    cross_and_matrix_test(base, self);
+    remove_all(base);
+    if (failures) fprintf(stderr, "%d selfhost pipeline failures\n", failures);
+    else puts("selfhost pipeline tests passed");
+    return failures ? 1 : 0;
+}

@@ -1,33 +1,35 @@
-/* Release orchestration only. The host bootstrap (the C driver linked with the
- * prepared native backend) compiles the C driver and the bridge dependencies
- * for the target with its embedded Clang and performs the final target link
- * with its embedded LLD. Build with:  cc -O1 -o tools/release tools/release.c */
+/* Shared self-host build and release pipeline. An explicitly selected cross_cc
+ * seed builds a fresh current host compiler, which builds each final compiler.
+ * Production compilation and linking never invoke a system compiler or Make. */
 #include "common.h"
 #include "windows_path/windows_path.c"
 
 static const char USAGE[] =
-    "usage: build/tools/release [options]   (make tools builds it)\n"
+    "usage: build/tools/release [options]\n"
     "\n"
-    "  --matrix=FILE         JSON {\"targets\":[{...}, {...}, {...}]}: build ONE host bootstrap,\n"
-    "                        then release linux-amd64, darwin-arm64, windows-amd64\n"
+    "  --compiler=FILE       REQUIRED absolute selected cross_cc seed (never system CC)\n"
+    "  --host-config=FILE    REQUIRED JSON host recipe; paths relative to checkout root\n"
+    "  --profile=release|debug  affects BOTH C driver and C++ bridge (default release)\n"
+    "  --build-only=FILE     publish native executable + FILE.build-manifest.txt; no packaging\n"
+    "  --matrix=FILE         JSON {\"targets\":[{...}, ...]}: share one fresh host stage1\n"
     "  --target=linux-amd64|darwin-arm64|darwin-amd64|windows-amd64\n"
-    "  --llvm-prefix=PATH     REQUIRED target LLVM 22.1.8 static SDK (not host libs)\n"
-    "  --link-args=FILE       REQUIRED final link recipe, one literal argument per line\n"
-    "  --link-mode=cc|lld     bootstrap cc driver (default) or direct embedded LLD\n"
-    "  --linux-glibc=VERSION driver ABI baseline (default 2.28); SDK must also meet it\n"
+    "  --llvm-prefix=PATH    target LLVM 22.1.8 static SDK; native default from host config\n"
+    "  --link-args=FILE      final link recipe, one literal argument per line\n"
+    "  --link-mode=cc|lld    cross_cc driver (default) or direct embedded LLD\n"
+    "  --linux-glibc=VERSION driver ABI baseline (default 2.34); SDK must also meet it\n"
     "  --cpu=NAME           target CPU (default x86-64-v2 on amd64, generic on arm64)\n"
-    "  --native-dir=PATH      prepared HOST bridge + linker-flags.txt (default .cache/native)\n"
-    "  --bridge=FILE          prebuilt TARGET bridge (default: host bridge for native target)\n"
-    "  --bridge-args=FILE     alternatively compile pinned bridge using embedded Clang;\n"
-    "                        one argument per line, including target C++ headers/CRT flags\n"
+    "  --native-dir=PATH     prepared authenticated C++ sources (default .cache/native)\n"
+    "  --bridge=FILE        advanced explicit prebuilt TARGET bridge, never a host default;\n"
+    "                       limits bridge verification to same-input identity, not convergence\n"
+    "  --bridge-args=FILE   compile fresh bridge, one argument per line, target C++/CRT flags\n"
     "  --version-object=FILE  plain clang Version.cpp object for a prebuilt --bridge= (REQUIRED\n"
     "                        there); built from the unmodified pinned source with an empty\n"
-    "                        VCSVersion.inc. Automatic for the host bridge and --bridge-args.\n"
+    "                        VCSVersion.inc. Freshly compiled with --bridge-args.\n"
     "  --lld-version-object=FILE  plain lld Common/Version.cpp object for a prebuilt --bridge=\n"
     "                        (REQUIRED there, like --version-object); built from the unmodified pinned\n"
     "                        source with empty VCSVersion.inc and llvm/Support/VCSRevision.h so\n"
     "                        getLLDVersion() and the ELF .comment carry no repository/commit.\n"
-    "                        Automatic for the host bridge and --bridge-args.\n"
+    "                        Freshly compiled with --bridge-args.\n"
     "  --path-args=FILE      Windows Path.cpp compile recipe (target C++/CRT headers/flags),\n"
     "                        defaults to --bridge-args; REQUIRED for a cross release with\n"
     "                        a prebuilt bridge. Always compiles authenticated LLVM sources,\n"
@@ -42,17 +44,17 @@ static const char USAGE[] =
     "\n"
     "Matrix entries accept target, llvm-prefix, link-args, link-mode, linux-glibc, cpu,\n"
     "bridge OR bridge-args, version-object, lld-version-object, sdk, output, extra-licenses,\n"
-    "msvc-helper, path-args. Only --native-dir may accompany --matrix. Exactly the three\n"
-    "primary targets above are required, without duplicates. All relative JSON path fields\n"
-    "resolve from the checkout root (NOT the JSON file directory); recipe arguments also run\n"
-    "from the checkout root. Use placeholders for relocatable recipes. Target input/recipe\n"
-    "paths are validated before the shared bootstrap build; a linker remains the authority\n"
-    "on ABI validity.\n"
+    "msvc-helper, path-args, native-dir. Matrix allows one to four distinct advertised targets.\n"
+    "Global --compiler, --host-config, --profile and --native-dir may accompany --matrix.\n"
+    "All relative JSON paths resolve from checkout root, NOT the JSON file directory.\n"
+    "Recipes also run from checkout root; use placeholders for relocatable inputs.\n"
+    "All target recipes are validated before compiling the shared host stage1.\n"
+    "A linker remains the authority on ABI validity.\n"
     "\n"
-    "Prerequisites: tools/build setup and native for the HOST bootstrap, and tools/build\n"
-    "built next to this tool. No downloads or native rebuilds are performed here. TARGET LLVM,\n"
-    "C++ ABI/CRT, compression/XML, platform SDK libraries, and a matching bridge must be\n"
-    "supplied for cross links. Linux LLVM archives cannot link a Windows or macOS executable.\n"
+    "Prerequisites: tools/build prepare for authenticated host sources/recipes, and tools/build\n"
+    "next to this tool for packaging. No downloads are performed here. Each stage rebuilds\n"
+    "C/C++ sources with the preceding compiler. Cross targets need their own LLVM, C++ ABI,\n"
+    "CRT, compression/XML and platform SDK libraries; host archives are never substituted.\n"
     "\n"
     "Recipes: blank lines and lines beginning # are ignored. Do not shell-quote paths;\n"
     "each line is already one argv element. Placeholders: {root}, {native}, {llvm},\n"
@@ -73,11 +75,11 @@ static const char USAGE[] =
     "pass the matching target libstdc++ archive/shared-library path explicitly.\n"
     "No shell, host compiler or host linker runs in the final target link.\n"
     "\n"
-    "Bridge source paths are remapped. The object and final link are each repeated at\n"
-    "identical staging paths; mismatches fail without publishing. manifest.txt records their\n"
-    "SHA-256 values, recipes, and explicit file inputs. This proves SAME-INPUT repeatability,\n"
-    "not yet cross-host equality: compare final hashes on each host using identical pinned\n"
-    "compilers, target SDK, bridge and recipes. The output bundle contains one executable,\n"
+    "Seed -> fresh current host stage1 -> final stage2. Native targets rebuild with a copied\n"
+    "stage2 at the SAME paths and compare stage2/stage3 binary, bridge and all object hashes.\n"
+    "Cross targets cannot run here: rebuild using stage1 proves same-input repeatability,\n"
+    "NOT native convergence or cross-host equality. Mismatches fail before publishing.\n"
+    "Detailed FILE.build-manifest.txt records hashes/recipes. Bundles contain one executable,\n"
     "lib/, vendor/, licenses/ and lock files. ZIP entries are UTF-8 byte-sorted with fixed\n"
     "1980 timestamps and Unix modes, compressed by raw DEFLATE (LZ77 with fixed Huffman\n"
     "codes, implemented in this tool). The ZIP is generated twice and compared before\n"
@@ -90,6 +92,8 @@ typedef struct {
     char *stage, *object, *binary, *link_mode, *linux_glibc, *cpu, *package_binary, *extra_licenses, *version, *lld_version, *msvc_helper;
     char *windows_path, *path_args;
     char *build_tool; /* tools/build next to this executable */
+    char *compiler, *host_config, *build_only, *profile, *resource_root;
+    int host_stage; /* internal: stage1 needs no packaging inputs */
 } Opts;
 
 static char *host(void) {
@@ -113,8 +117,10 @@ static Strs environment(const Opts *o) {
     strs_add(&extra, "SOURCE_DATE_EPOCH=0");
     strs_add(&extra, "ZERO_AR_DATE=1");
     strs_add(&extra, "LC_ALL=C");
-    strs_addf(&extra, "CROSS_CC_ROOT=%s", o->root);
-    strs_addf(&extra, "CROSS_CC_CACHE_DIR=%s", PJ(o->root, ".cache", "cc"));
+    /* Aliases live in staging directories, not next to the seed's lib/ tree.
+     * Pin the seed to its own resources; only current-stage compilers use ours. */
+    strs_addf(&extra, "CROSS_CC_ROOT=%s", *o->resource_root ? o->resource_root : o->root);
+    strs_addf(&extra, "CROSS_CC_CACHE_DIR=%s", PJ(o->root, ".cache", o->host_stage ? "seed-cc" : "cc"));
     return make_env(drop, &extra);
 }
 
@@ -425,12 +431,13 @@ static void emit(const Opts *o, const char *boot) {
     strs_add(&a, "-target");
     strs_add(&a, cc_target(o));
     strs_add(&a, "-std=c11");
-    strs_add(&a, "-O2");
+    strs_add(&a, !strcmp(o->profile, "debug") ? "-O0" : "-O2");
+    if (!strcmp(o->profile, "debug")) strs_add(&a, "-g");
     strs_add(&a, "-c");
     strs_add(&a, "-fPIC");
     if (!strcmp(o->target + strlen(o->target) - 5, "amd64")) strs_addf(&a, "-march=%s", o->cpu);
     else strs_addf(&a, "-mcpu=%s", o->cpu);
-    strs_add(&a, "-DNDEBUG");
+    if (strcmp(o->profile, "debug")) strs_add(&a, "-DNDEBUG");
     strs_add(&a, "-DCROSS_CC_RELEASE_OBJECT=1");
     strs_addf(&a, "-I%s", PJ(o->root, "src"));
     if (is_windows_target(o)) strs_add(&a, "-DCROSS_CC_WINDOWS_CANONICAL_PATHS=1");
@@ -444,7 +451,7 @@ static void emit(const Opts *o, const char *boot) {
 static void compile_bridge_object(const Opts *o, const char *clang, const char *src, const char *extra_include, const char *input, const char *out) {
     Strs a = {0};
     strs_add(&a, clang);
-    static const char *const base[] = {"--no-default-config", "-std=c++17", "-O2", "-w", "-c", "-ffunction-sections", "-fdata-sections", "-fno-exceptions", "-fno-rtti", "-fno-stack-protector", "-fvisibility-inlines-hidden", "-DLLVM_BUILD_STATIC", "-DCLANG_BUILD_STATIC", "-D__STDC_CONSTANT_MACROS", "-D__STDC_FORMAT_MACROS", "-D__STDC_LIMIT_MACROS", NULL};
+    static const char *const base[] = {"--no-default-config", "-std=c++17", "-w", "-c", "-ffunction-sections", "-fdata-sections", "-fno-exceptions", "-fno-rtti", "-fno-stack-protector", "-fvisibility-inlines-hidden", "-DLLVM_BUILD_STATIC", "-DCLANG_BUILD_STATIC", "-D__STDC_CONSTANT_MACROS", "-D__STDC_FORMAT_MACROS", "-D__STDC_LIMIT_MACROS", NULL};
     strs_addv(&a, base);
     /* Generated headers first: they must shadow the installed VCSRevision.h. */
     if (*extra_include) strs_addf(&a, "-I%s", extra_include);
@@ -462,6 +469,9 @@ static void compile_bridge_object(const Opts *o, const char *clang, const char *
         strs_cat(&a, &r);
     }
     if (is_path) strs_addv(&a, wp_flags);
+    /* Last wins: an SDK recipe cannot silently turn a debug bridge into O2. */
+    strs_add(&a, !strcmp(o->profile, "debug") ? "-O0" : "-O2");
+    strs_add(&a, !strcmp(o->profile, "debug") ? "-g" : "-DNDEBUG");
     strs_addf(&a, "--target=%s", target_triple(o));
     /* COFF .debug$S otherwise records the absolute object output path. */
     if (is_windows_target(o)) strs_add(&a, "-mno-incremental-linker-compatible");
@@ -704,6 +714,7 @@ static Opts preflight(Opts o) {
     if (!*o.cpu) o.cpu = ends_with(o.target, "-amd64") ? "x86-64-v2" : "generic";
     if (strcmp(o.link_mode, "cc") && strcmp(o.link_mode, "lld")) fail("--link-mode must be cc or lld");
     if (!*o.output) o.output = PJ(o.root, "dist", sfmt("cross_cc-%s", o.target));
+    if (!o.host_stage && !*o.build_only) {
     static const char *const suffixes[] = {"", ".bundle-stage", ".zip", ".zip.stage", ".zip.repeat", ".zip.sha256", ".build-manifest.txt", NULL};
     for (int i = 0; suffixes[i]; i++) {
         char *p = sfmt("%s%s", o.output, suffixes[i]);
@@ -734,22 +745,18 @@ static Opts preflight(Opts o) {
     } else if (*o.msvc_helper) {
         fail("msvc.lock.json required for --msvc-helper=");
     }
+    }
     if (*o.package_binary) {
         require_file(o.package_binary);
         return o;
     }
     if (!*o.llvm || !*o.link_args) fail("--llvm-prefix= and --link-args= are required; no cross-host SDK is guessed");
     if (!*o.native) o.native = PJ(o.root, ".cache", "native");
-    require_file(PJ(o.native, "linker-flags.txt"));
-    require_file(PJ(o.native, "libcross_cc_backend.a"));
     if (*o.bridge_args && (*o.version || *o.lld_version)) fail("--version-object= and --lld-version-object= are for prebuilt --bridge=; --bridge-args= builds its own");
     if (*o.bridge_args && *o.bridge) fail("choose --bridge= OR --bridge-args=, not both");
-    char *host_bridge = PJ(o.native, "libcross_cc_backend.a");
-    if (!*o.bridge && !*o.bridge_args) {
-        if (strcmp(o.target, host()) != 0) fail("cross target requires --bridge= or --bridge-args=; host bridge is not portable");
-        o.bridge = host_bridge;
-    }
-    o.stage = PJ(o.root, "build", "release", sfmt("%s.stage", o.target));
+    if (!*o.bridge && !*o.bridge_args) fail("--bridge-args= is required to build a fresh bridge (advanced prebuilt --bridge= requires both version objects)");
+    if (o.host_stage && *o.bridge) fail("host stage1 must build a fresh bridge, not --bridge=");
+    if (!*o.stage) o.stage = PJ(o.root, "build", "release", sfmt("%s.stage", o.target));
     if (exists(o.stage)) fail("stage %s exists; inspect it before removing", o.stage);
     o.object = PJ(o.stage, "cross_cc.o");
     o.binary = PJ(o.stage, is_windows_target(&o) ? "cross_cc.exe" : "cross_cc");
@@ -775,15 +782,8 @@ static Opts preflight(Opts o) {
         }
     } else {
         require_file(o.bridge);
-        if (!*o.version) {
-            if (strcmp(o.bridge, host_bridge) != 0) fail("prebuilt --bridge= requires --version-object= (plain upstream clang Version.cpp object for the target); the host object is never substituted");
-            o.version = PJ(o.native, "obj", "clang-Version.cpp.o");
-        }
-        if (!*o.lld_version) {
-            if (strcmp(o.bridge, host_bridge) != 0) fail("prebuilt --bridge= requires --lld-version-object= (plain upstream lld Common/Version.cpp object for the target); the host object is never substituted");
-            o.lld_version = PJ(o.native, "obj", "lld-Version.cpp.o");
-            if (!exists(o.lld_version)) fail("host lld version object %s missing; re-run tools/build native", o.lld_version);
-        }
+        if (!*o.version || !*o.lld_version) fail("advanced prebuilt --bridge= requires both version objects; no host object is substituted");
+
         require_file(o.version);
         require_file(o.lld_version);
     }
@@ -800,28 +800,6 @@ static Opts preflight(Opts o) {
     return o;
 }
 
-/* Host bootstrap: the C driver linked with the prepared host backend. */
-static char *build_bootstrap(const Opts *o, const char *boot_stage) {
-    char *boot = PJ(boot_stage, sfmt("bootstrap%s", EXE_SUFFIX));
-    char *cc = xstrdup(*env_get("CC") ? env_get("CC") : "cc");
-    Strs a = {0};
-    strs_add(&a, cc);
-    strs_add(&a, "-std=c11");
-    strs_add(&a, "-O2");
-    strs_add(&a, "-DNDEBUG");
-    strs_addf(&a, "-I%s", PJ(o->root, "src"));
-    strs_add(&a, PJ(o->root, "main.c"));
-    strs_add(&a, "-o");
-    strs_add(&a, boot);
-    Strs link = split_quoted(read_file(PJ(o->native, "linker-flags.txt"), NULL));
-    strs_cat(&a, &link);
-    if (!strcmp(HOST_OS, "linux")) {
-        strs_add(&a, "-lstdc++");
-        strs_add(&a, "-lm");
-    }
-    run(o, &a, NULL);
-    return boot;
-}
 
 static void hash_tree(Buf *manifest, const char *label, const char *root) {
     Strs names = {0};
@@ -834,7 +812,7 @@ static void hash_tree(Buf *manifest, const char *label, const char *root) {
     }
 }
 
-static void release_target(const Opts *o, const char *boot) {
+static void build_stage(const Opts *o, const char *boot) {
     static const char *const aliases[] = {"cross_clang", "llvm-ar", "ld.lld", "ld64.lld", "lld-link", NULL};
     for (int i = 0; aliases[i]; i++) {
         char *dst = PJ(o->stage, sfmt("%s%s", aliases[i], EXE_SUFFIX));
@@ -846,10 +824,6 @@ static void release_target(const Opts *o, const char *boot) {
     if (!exists(o->bridge)) fail("target bridge missing %s", o->bridge);
     if (is_windows_target(o)) build_windows_path(o, clang);
     emit(o, boot);
-    char *object_sha = sha(o->object);
-    remove_file(o->object);
-    emit(o, boot);
-    if (strcmp(sha(o->object), object_sha) != 0) fail("C driver object is not repeatable; unpublished stage retained at %s", o->stage);
     const char *tool = "ld.lld";
     if (is_windows_target(o)) tool = "lld-link";
     if (is_darwin_target(o)) tool = "ld64.lld";
@@ -866,16 +840,18 @@ static void release_target(const Opts *o, const char *boot) {
     }
     if (!has_object || !has_bridge) fail("link recipe must include {object} and {bridge} as separate inputs");
     link_target(o, linker, &inputs);
-    char *binary_sha = sha(o->binary);
-    remove_file(o->binary);
-    link_target(o, linker, &inputs);
-    if (strcmp(sha(o->binary), binary_sha) != 0) fail("link is not repeatable; unpublished stage retained at %s", o->stage);
+}
+
+static Buf build_receipt(const Opts *o, const char *boot, const char *verification) {
+    Strs inputs = recipe(o, o->link_args);
     Buf m = {0};
-    buf_addf(&m, "target %s\ncpu %s\nrequested-linux-glibc %s\nlink-mode %s\nobject-sha256 %s\nbinary-sha256 %s\nverification same-input repeated C object emission and embedded LLD link\n", o->target, o->cpu, o->linux_glibc, o->link_mode, object_sha, binary_sha);
-    buf_addf(&m, "bootstrap-sha256 %s\n", sha(boot));
-    char *files[] = {PJ(o->root, "main.c"), PJ(o->root, "tools", "release.c"), PJ(o->root, "tools", "build.c"), PJ(o->root, "tools", "common.h"), PJ(o->root, "tools", "linux-release-deps.c"), PJ(o->root, "tools", "macos-x64-llvm.c"), o->link_args, o->bridge, PJ(o->native, "linker-flags.txt"), o->version, o->lld_version, PJ(o->root, "toolchain.lock.json"), PJ(o->root, "upstream.lock.json")};
+    buf_addf(&m, "target %s\ncpu %s\nprofile %s\nrequested-linux-glibc %s\nlink-mode %s\nobject-sha256 %s\nbridge-sha256 %s\nbinary-sha256 %s\nverification %s\n", o->target, o->cpu, o->profile, o->linux_glibc, o->link_mode, sha(o->object), sha(o->bridge), sha(o->binary), verification);
+    buf_addf(&m, "%s-sha256 %s\nseed-sha256 %s\nhost-config-sha256 %s\nresource-root %s\nprebuilt-bridge %s\n", o->host_stage ? "seed-compiler" : "stage1", sha(boot), sha(o->compiler), sha(o->host_config), *o->resource_root ? o->resource_root : o->root, *o->bridge_args ? "false" : "true (not compiler convergence of bridge)");
+    if (o->host_stage) buf_addf(&m, "seed-resource-lock %s\n", sha(PJ(o->resource_root, "upstream.lock.json")));
+    char *files[] = {PJ(o->root, "main.c"), PJ(o->root, "tools", "release.c"), PJ(o->root, "tools", "build.c"), PJ(o->root, "tools", "common.h"), PJ(o->root, "tools", "linux-release-deps.c"), PJ(o->root, "tools", "macos-x64-llvm.c"), o->link_args, o->bridge, o->host_config, o->version, o->lld_version, PJ(o->root, "toolchain.lock.json"), PJ(o->root, "upstream.lock.json")};
     for (size_t i = 0; i < sizeof files / sizeof files[0]; i++) buf_addf(&m, "input %s %s\n", sha(files[i]), files[i]);
     hash_tree(&m, "driver-source", PJ(o->root, "src"));
+    if (*o->bridge_args) hash_tree(&m, "bridge-source", PJ(o->root, "deps", "llvm-bridge"));
     if (is_windows_target(o)) {
         char *pdir = PJ(o->stage, "windows-path");
         buf_addf(&m, "windows-canonical-paths true\n%s%s", read_file(PJ(pdir, "inputs.txt"), NULL), read_file(PJ(pdir, "compile.txt"), NULL));
@@ -908,17 +884,61 @@ static void release_target(const Opts *o, const char *boot) {
         buf_addf(&m, "link-arg %s\n", inputs.v[i]);
         if (is_file(inputs.v[i])) buf_addf(&m, "input %s %s\n", sha(inputs.v[i]), inputs.v[i]);
     }
-    /* Keep detailed host-path provenance outside the portable archive. */
-    char *receipt = sfmt("%s.build-manifest.txt", o->output);
-    if (exists(receipt)) fail("build receipt exists: %s", receipt);
-    mkdirs(path_dir(o->output));
-    write_file(receipt, buf_cstr(&m));
-    package_release(o, binary_sha);
+    return m;
+}
+
+/* Include every freshly built C/C++ object, not just the final link. Names are
+ * stage-relative so the two passes compare artifacts, not compiler aliases. */
+static char *stage_hashes(const Opts *o) {
+    Strs names = {0};
+    zip_files(o->stage, "", &names);
+    strs_sort(&names);
+    Buf hashes = {0};
+    for (int i = 0; i < names.n; i++) {
+        if (ends_with(names.v[i], ".o") || ends_with(names.v[i], ".a"))
+            buf_addf(&hashes, "artifact %s %s\n", sha(PJ(o->stage, names.v[i])), names.v[i]);
+    }
+    buf_addf(&hashes, "bridge-sha256 %s\nversion-sha256 %s\nlld-version-sha256 %s\nbinary-sha256 %s\n", sha(o->bridge), sha(o->version), sha(o->lld_version), sha(o->binary));
+    return (char *)buf_cstr(&hashes);
+}
+
+static void release_target(const Opts *o, const char *boot, const char *safe_stage, const char *host_receipt) {
+    build_stage(o, boot);
+    char *first = stage_hashes(o);
+    int native = !strcmp(o->target, host());
+    const char *repeat_compiler = boot;
+    if (native) {
+        /* Never execute a path that the rebuild will truncate. A copy rather
+         * than a hard link also isolates aliases from the final output inode. */
+        char *safe = PJ(safe_stage, sfmt("stage2-%s%s", o->target, EXE_SUFFIX));
+        copy_new(safe, o->binary);
+        repeat_compiler = safe;
+    }
+    remove_file(o->binary);
+    if (*o->bridge_args) remove_file(o->bridge);
+    build_stage(o, repeat_compiler);
+    if (strcmp(first, stage_hashes(o))) fail("%s failed: binary or bridge/object hashes differ; unpublished stages retained at %s", native ? "native stage2/stage3 convergence" : "cross same-input repeatability", o->stage);
+    const char *verification = native ? "native stage2/stage3 convergence (binary and all fresh objects)" : "cross same-input repeatability using stage1; target not executed; NOT native convergence";
+    Buf m = build_receipt(o, boot, verification);
+    buf_str(&m, first);
+    Strs host_lines = split_lines(host_receipt);
+    for (int i = 0; i < host_lines.n; i++) buf_addf(&m, "host-stage1 %s\n", host_lines.v[i]);
+    const char *destination = *o->build_only ? o->build_only : o->output;
+    mkdirs(path_dir(destination));
+    if (*o->build_only) {
+        char *pending = sfmt("%s.selfhost-stage", destination);
+        copy_new(pending, o->binary);
+        rename_path(pending, destination);
+    }
+    write_file(sfmt("%s.build-manifest.txt", destination), buf_cstr(&m));
+    if (!*o->build_only) package_release(o, sha(o->binary));
+    else printf("release: verified native executable %s\n", destination);
 }
 
 static void set_target_option(Opts *o, const char *key, const char *value, const char *base) {
     if (!strcmp(key, "target")) o->target = xstrdup(value);
     else if (!strcmp(key, "llvm-prefix")) o->llvm = config_path(base, value);
+    else if (!strcmp(key, "native-dir")) o->native = config_path(base, value);
     else if (!strcmp(key, "bridge")) o->bridge = config_path(base, value);
     else if (!strcmp(key, "bridge-args")) o->bridge_args = config_path(base, value);
     else if (!strcmp(key, "version-object")) o->version = config_path(base, value);
@@ -936,15 +956,15 @@ static void set_target_option(Opts *o, const char *key, const char *value, const
     else fail("unknown target option %s", key);
 }
 
-static int matrix_targets(const Opts *common, const char *file, Opts out[3]) {
+static int matrix_targets(const Opts *common, const char *file, Opts out[4]) {
     Json *data = json_load(file);
     if (data->type != J_OBJ) fail("matrix must be an object");
     for (int i = 0; i < data->n; i++) {
         if (strcmp(data->keys[i], "targets")) fail("unknown matrix key %s", data->keys[i]);
     }
     Json *entries = jarr_opt(data, "targets");
-    if (!entries || entries->n != 3) fail("matrix requires exactly three targets");
-    for (int e = 0; e < 3; e++) {
+    if (!entries || entries->n < 1 || entries->n > 4) fail("matrix requires one to four distinct advertised targets");
+    for (int e = 0; e < entries->n; e++) {
         Json *item = entries->items[e];
         if (item->type != J_OBJ) fail("matrix target must be an object");
         Opts o = *common;
@@ -954,37 +974,86 @@ static int matrix_targets(const Opts *common, const char *file, Opts out[3]) {
             if (!strcmp(item->keys[k], "package-only")) fail("matrix builds from source; package-only is not allowed");
             set_target_option(&o, item->keys[k], item->items[k]->str, o.root);
         }
-        if (strcmp(o.target, "linux-amd64") && strcmp(o.target, "darwin-arm64") && strcmp(o.target, "windows-amd64")) fail("matrix target must be linux-amd64, darwin-arm64 or windows-amd64, got \"%s\"", o.target);
+        if (strcmp(o.target, "linux-amd64") && strcmp(o.target, "darwin-arm64") && strcmp(o.target, "darwin-amd64") && strcmp(o.target, "windows-amd64")) fail("unsupported matrix target \"%s\"", o.target);
         for (int p = 0; p < e; p++) {
             if (!strcmp(out[p].target, o.target)) fail("duplicate matrix target %s", o.target);
         }
         out[e] = o;
     }
-    return 3;
+    return entries->n;
+}
+
+static Opts default_options(void) {
+    Opts o;
+    memset(&o, 0, sizeof o);
+    char **fields[] = {&o.root, &o.target, &o.llvm, &o.native, &o.bridge, &o.bridge_args, &o.link_args, &o.sdk, &o.output, &o.stage, &o.object, &o.binary, &o.cpu, &o.package_binary, &o.extra_licenses, &o.version, &o.lld_version, &o.msvc_helper, &o.windows_path, &o.path_args, &o.build_tool, &o.compiler, &o.host_config, &o.build_only, &o.resource_root};
+    for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) *fields[i] = "";
+    o.link_mode = "cc";
+    o.linux_glibc = "2.34";
+    o.profile = "release";
+    o.target = host();
+    return o;
+}
+
+static char *seed_resource_root(const char *compiler) {
+    const char *override = env_get("CROSS_CC_SEED_ROOT");
+    char *dir = *override ? abs_path(override) : path_dir(compiler);
+    for (;;) {
+        if (is_file(PJ(dir, "upstream.lock.json")) && is_dir(PJ(dir, "lib", "include")) && is_dir(PJ(dir, "lib", "libc"))) return dir;
+        char *parent = path_dir(dir);
+        if (*override || !strcmp(parent, dir) || !*parent) break;
+        dir = parent;
+    }
+    fail("seed resources missing: compiler needs its own upstream.lock.json, lib/include and lib/libc (or CROSS_CC_SEED_ROOT)");
+    return NULL;
+}
+
+static Opts host_options(const Opts *common) {
+    Opts h = default_options();
+    h.root = common->root;
+    h.build_tool = common->build_tool;
+    h.compiler = common->compiler;
+    h.host_config = common->host_config;
+    h.profile = common->profile;
+    h.host_stage = 1;
+    Json *data = json_load(common->host_config);
+    if (data->type != J_OBJ) fail("host config must be a recipe object");
+    for (int i = 0; i < data->n; i++) {
+        if (data->items[i]->type != J_STR) fail("host config field %s must be a string", data->keys[i]);
+        const char *k = data->keys[i];
+        if (!strcmp(k, "package-only") || !strcmp(k, "output") || !strcmp(k, "bridge") || !strcmp(k, "version-object") || !strcmp(k, "lld-version-object")) fail("host config must build fresh objects, not %s", k);
+        set_target_option(&h, k, data->items[i]->str, h.root);
+    }
+    if (strcmp(h.target, host())) fail("host config target %s does not match %s", h.target, host());
+    h.stage = PJ(h.root, "build", "release", "host-stage1.stage");
+    h.resource_root = seed_resource_root(h.compiler);
+    return preflight(h);
+}
+
+static Opts native_defaults(Opts o, const Opts *h) {
+    if (strcmp(o.target, host())) return o;
+    if (!*o.llvm) o.llvm = h->llvm;
+    if (!*o.native) o.native = h->native;
+    if (!*o.sdk) o.sdk = h->sdk;
+    if (!*o.link_args) { o.link_args = h->link_args; o.link_mode = h->link_mode; }
+    if (!*o.bridge && !*o.bridge_args) o.bridge_args = h->bridge_args;
+    if (!*o.path_args) o.path_args = h->path_args;
+    if (!*o.cpu) o.cpu = h->cpu;
+    return o;
 }
 
 int main(int argc, char **argv) {
     tool_name = "release";
-    Opts o;
-    memset(&o, 0, sizeof o);
-    char *empty = "";
-    char **fields[] = {&o.target, &o.llvm, &o.native, &o.bridge, &o.bridge_args, &o.link_args, &o.sdk, &o.output, &o.stage, &o.object, &o.binary, &o.cpu, &o.package_binary, &o.extra_licenses, &o.version, &o.lld_version, &o.msvc_helper, &o.windows_path, &o.path_args};
-    for (size_t i = 0; i < sizeof fields / sizeof fields[0]; i++) *fields[i] = empty;
-    o.link_mode = "cc";
-    o.linux_glibc = "2.28";
+    Opts o = default_options();
     char *cwd = getcwd_dup();
     char *self = abs_path(argv[0]);
     o.root = find_root(argv[0]);
     o.build_tool = PJ(path_dir(self), sfmt("build%s", EXE_SUFFIX));
-    o.target = host();
     char *matrix_file = NULL;
     int single_options = 0;
     for (int i = 1; i < argc; i++) {
         const char *a = argv[i];
-        if (!strcmp(a, "--help") || !strcmp(a, "-h")) {
-            fputs(USAGE, stdout);
-            return 0;
-        }
+        if (!strcmp(a, "--help") || !strcmp(a, "-h")) { fputs(USAGE, stdout); return 0; }
         const char *eq = strchr(a, '=');
         if (!eq || !starts_with(a, "--")) fail("expected --option=value, got %s", a);
         char *key = (char *)xmalloc((size_t)(eq - a) + 1);
@@ -994,47 +1063,51 @@ int main(int argc, char **argv) {
         if (!strcmp(key, "--matrix")) {
             if (matrix_file) fail("--matrix specified twice");
             matrix_file = abs_path(value);
-        } else if (!strcmp(key, "--native-dir")) {
-            o.native = abs_path(value);
-        } else {
-            single_options = 1;
-            set_target_option(&o, key + 2, value, cwd);
-        }
+        } else if (!strcmp(key, "--native-dir")) o.native = abs_path(value);
+        else if (!strcmp(key, "--compiler")) {
+            if (!is_abs(value)) fail("--compiler must be an absolute path selected by the launcher/build tool");
+            o.compiler = xstrdup(value);
+        } else if (!strcmp(key, "--host-config")) o.host_config = abs_path(value);
+        else if (!strcmp(key, "--profile")) o.profile = xstrdup(value);
+        else if (!strcmp(key, "--build-only")) { o.build_only = abs_path(value); single_options = 1; }
+        else { single_options = 1; set_target_option(&o, key + 2, value, cwd); }
     }
-    if (matrix_file && single_options) fail("--matrix is exclusive with single-target options; only --native-dir may accompany it");
-    Opts targets[3];
+    if (strcmp(o.profile, "debug") && strcmp(o.profile, "release")) fail("--profile must be debug or release");
+    if (matrix_file && single_options) fail("--matrix may accompany only --native-dir, --compiler, --host-config and --profile");
+    if (*o.package_binary) {
+        if (*o.build_only) fail("--build-only cannot accompany --package-only");
+        o = preflight(o);
+        o.binary = o.package_binary;
+        mkdirs(PJ(o.root, ".cache", "tmp"));
+        package_release(&o, sha(o.binary));
+        return 0;
+    }
+    if (!*o.compiler || !*o.host_config) fail("--compiler=/absolute/cross_cc and --host-config=FILE are required for self-host builds");
+    require_file(o.compiler);
+    require_file(o.host_config);
+    Opts h = host_options(&o);
+    Opts targets[4];
     int count = 1;
     targets[0] = o;
     if (matrix_file) count = matrix_targets(&o, matrix_file, targets);
-    for (int i = 0; i < count; i++) targets[i] = preflight(targets[i]);
-    /* Prevent aliases/nesting and collisions with another target's ZIP/receipt. */
     for (int i = 0; i < count; i++) {
+        targets[i] = native_defaults(targets[i], &h);
+        if (*targets[i].build_only && strcmp(targets[i].target, host())) fail("--build-only publishes only a native executable");
+        targets[i] = preflight(targets[i]);
         for (int j = 0; j < i; j++) {
             const char *a = targets[i].output, *b = targets[j].output;
             if (!strcmp(a, b) || starts_with(a, sfmt("%s.", b)) || starts_with(b, sfmt("%s.", a)) || starts_with(a, sfmt("%s/", b)) || starts_with(b, sfmt("%s/", a))) fail("overlapping matrix outputs: %s and %s", a, b);
         }
     }
     mkdirs(PJ(o.root, ".cache", "tmp"));
-    mkdirs(PJ(o.root, "build", "release"));
-    if (*targets[0].package_binary) {
-        Opts t = targets[0];
-        t.binary = t.package_binary;
-        package_release(&t, sha(t.binary));
-        return 0;
-    }
-    char *boot_stage = targets[0].stage;
-    if (matrix_file) {
-        boot_stage = PJ(o.root, "build", "release", "matrix.stage");
-        claim_stage(boot_stage);
-    }
-    for (int i = 0; i < count; i++) {
-        if (!matrix_file && i == 0) claim_stage(targets[i].stage);
-        else if (matrix_file) claim_stage(targets[i].stage);
-    }
-    char *boot = build_bootstrap(&targets[0], boot_stage);
-    for (int i = 0; i < count; i++) release_target(&targets[i], boot);
-    /* Only failures keep stages for inspection; published releases must not block the next run. */
+    claim_stage(h.stage);
+    for (int i = 0; i < count; i++) claim_stage(targets[i].stage);
+    build_stage(&h, o.compiler);
+    Buf hm = build_receipt(&h, o.compiler, "seed-built fresh host stage1; not a convergence claim");
+    buf_str(&hm, stage_hashes(&h));
+    for (int i = 0; i < count; i++) release_target(&targets[i], h.binary, h.stage, buf_cstr(&hm));
+    /* Failed verification retains all stages. Only success removes owned paths. */
     for (int i = 0; i < count; i++) remove_all(targets[i].stage);
-    if (matrix_file) remove_all(boot_stage);
+    remove_all(h.stage);
     return 0;
 }
