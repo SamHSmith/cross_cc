@@ -925,6 +925,10 @@ static void release_target(const Opts *o, const char *boot, const char *safe_sta
     }
     remove_file(o->binary);
     if (*o->bridge_args) remove_file(o->bridge);
+    /* Only this freshly claimed stage is rebuilt. Reauthenticate/re-extract
+     * Path inputs for the second pass; keep wp_prepare's existing-dir guard
+     * for stale/failed stages and retain the final pass's provenance. */
+    if (is_windows_target(o)) remove_all(PJ(o->stage, "windows-path"));
     build_stage(o, repeat_compiler);
     if (strcmp(first, stage_hashes(o))) fail("%s failed: binary or bridge/object hashes differ; unpublished stages retained at %s", native ? "native stage2/stage3 convergence" : "cross same-input repeatability", o->stage);
     const char *verification = native ? "native stage2/stage3 convergence (binary and all fresh objects)" : "cross same-input repeatability using stage1; target not executed; NOT native convergence";
