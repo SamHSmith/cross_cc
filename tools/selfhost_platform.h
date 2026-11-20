@@ -137,8 +137,12 @@ static void sp_link_tail(const SelfhostHost *h, Strs *a, const char *system_libs
     strs_add(a, "{sdk}/sdk/lib/ucrt/x86_64/libucrt.lib");
     for (int i = 0; MSVC_LIBDIRS[i]; i++) strs_addf(a, "-L{sdk}/%s", MSVC_LIBDIRS[i]);
     sp_system_libs(a, system_libs, zstd_archive, xml2_archive, h->host);
-    /* Clang normally supplies this OS import library with its default CRT. */
+    /* kernel32 normally comes from Clang's default CRT link. LLVM's Windows
+     * driver needs version, and static libxml2 needs bcrypt; llvm-config may
+     * omit both from --system-libs, so own these OS imports explicitly too. */
     strs_add(a, "-lkernel32");
+    strs_add(a, "-lversion");
+    strs_add(a, "-lbcrypt");
 }
 
 /* Head of the final link recipe (release.c requires these exact inputs). */
