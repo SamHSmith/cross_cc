@@ -3,6 +3,9 @@
  * Production compilation and linking never invoke a system compiler or Make. */
 #include "common.h"
 #include "windows_path/windows_path.c"
+#define CROSS_CC_MSVC_ENV_ONLY
+#include "selfhost_platform.h"
+#undef CROSS_CC_MSVC_ENV_ONLY
 
 static const char USAGE[] =
     "usage: build/tools/release [options]\n"
@@ -121,7 +124,9 @@ static Strs environment(const Opts *o) {
      * Pin the seed to its own resources; only current-stage compilers use ours. */
     strs_addf(&extra, "CROSS_CC_ROOT=%s", *o->resource_root ? o->resource_root : o->root);
     strs_addf(&extra, "CROSS_CC_CACHE_DIR=%s", PJ(o->root, ".cache", o->host_stage ? "seed-cc" : "cc"));
-    return make_env(drop, &extra);
+    Strs env = make_env(drop, &extra);
+    if (is_windows_target(o) && *o->sdk && *o->stage) sp_msvc_env(&env, o->sdk, PJ(o->stage, "msvc-libc.txt"));
+    return env;
 }
 
 static void run(const Opts *o, Strs *args, const char *cwd) {
@@ -858,6 +863,10 @@ static Buf build_receipt(const Opts *o, const char *boot, const char *verificati
         char *wf[] = {PJ(o->root, "tools", "windows_path", "windows_path.c"), PJ(o->root, "compiler-rt.lock.json"), PJ(pdir, "compile.txt"), o->windows_path};
         for (int i = 0; i < 4; i++) buf_addf(&m, "windows-path-input %s %s\n", sha(wf[i]), wf[i]);
         if (*o->path_args) buf_addf(&m, "windows-path-input %s %s\n", sha(o->path_args), o->path_args);
+        if (*o->sdk) {
+            char *libc = PJ(o->stage, "msvc-libc.txt");
+            buf_addf(&m, "msvc-sdk-mode system\nmsvc-libc-input %s %s\n", sha(libc), libc);
+        }
     }
     if (*o->bridge_args) {
         buf_addf(&m, "input %s %s\n", sha(o->bridge_args), o->bridge_args);
@@ -1039,6 +1048,8 @@ static Opts native_defaults(Opts o, const Opts *h) {
     if (!*o.bridge && !*o.bridge_args) o.bridge_args = h->bridge_args;
     if (!*o.path_args) o.path_args = h->path_args;
     if (!*o.cpu) o.cpu = h->cpu;
+    if (!*o.extra_licenses) o.extra_licenses = h->extra_licenses;
+    if (!*o.msvc_helper) o.msvc_helper = h->msvc_helper;
     return o;
 }
 

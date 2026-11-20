@@ -584,7 +584,11 @@ static char *static_lib(const char *libdir, const char *name) {
         if (exists(winlib)) return winlib;
     }
     char *f = PJ(libdir, sfmt("lib%s.a", name));
-    if (!exists(f)) fail("missing static library %s (LLVM_PREFIX must contain static Clang, LLD and LLVM libraries)", f);
+    if (!exists(f)) {
+        char *winlib = PJ(libdir, sfmt("%s.lib", name));
+        if (exists(winlib)) return winlib;
+        fail("missing static library %s (LLVM_PREFIX must contain static Clang, LLD and LLVM libraries)", f);
+    }
     return f;
 }
 
@@ -850,7 +854,7 @@ static void recipe_tblgen(const Opts *o, const SelfhostCfg *c, const char *dir, 
         strs_add(&link, obj);
     }
     static const char *const tglibs[] = {"LLVMTableGenBasic", "LLVMTableGenCommon", "LLVMTableGen", "LLVMSupport", "LLVMDemangle", NULL};
-    int group = strcmp(c->h->kind, "apple") != 0; /* ld64 resolves archives without groups */
+    int group = !strcmp(c->h->kind, "linux"); /* ELF only; ld64 and COFF resolve archives without groups */
     if (group) strs_add(&link, "-Wl,--start-group");
     for (int i = 0; tglibs[i]; i++) strs_add(&link, static_lib(PJ(c->llvm, "lib"), tglibs[i]));
     if (group) strs_add(&link, "-Wl,--end-group");
@@ -860,7 +864,12 @@ static void recipe_tblgen(const Opts *o, const SelfhostCfg *c, const char *dir, 
     strs_add(&link, "-o");
     strs_add(&link, helper);
     for (int k = 0; k < link.n; k++) buf_addf(receipt, "generator-build-arg %s\n", link.v[k]);
-    seed_must(o, o->root, &link);
+    if (!strcmp(c->h->kind, "msvc")) {
+        Strs env = seed_env(o);
+        sp_msvc_env(&env, c->sdk, PJ(dir, "msvc-libc.txt"));
+        int code = run_cmd(link.v, o->root, env.v);
+        if (code) fail("MSVC option-table generator link failed (exit %d)", code);
+    } else seed_must(o, o->root, &link);
 }
 
 static char *prepare_dsymutil(const Opts *o, const char *ndir, const char *llvm, const SelfhostCfg *seed) {
@@ -1144,8 +1153,8 @@ static void host_llvm_libs(const Opts *o, Strs *a, const char *llvm) {
     for (int k = 0; keys[k]; k++) {
         Json *arr = jarr_opt(nat, keys[k]);
         for (int i = 0; arr && i < arr->n; i++) {
-            static_lib(libdir, arr->items[i]->str);
-            strs_addf(a, "{llvm}/lib/lib%s.a", arr->items[i]->str);
+            char *archive = static_lib(libdir, arr->items[i]->str);
+            strs_addf(a, "{llvm}/lib/%s", path_base(archive));
         }
     }
     char *config = PJ(llvm, "bin", sfmt("llvm-config%s", EXE_SUFFIX));
