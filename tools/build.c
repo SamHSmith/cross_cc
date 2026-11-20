@@ -863,7 +863,7 @@ static void recipe_tblgen(const Opts *o, const SelfhostCfg *c, const char *dir, 
     seed_must(o, o->root, &link);
 }
 
-static char *prepare_dsymutil(const Opts *o, const char *ndir, const char *llvm, const char *cxx, const char *external_flags, const char *support_override, const Strs *flags, const SelfhostCfg *seed) {
+static char *prepare_dsymutil(const Opts *o, const char *ndir, const char *llvm, const SelfhostCfg *seed) {
     Json *lock = json_load(PJ(o->root, "compiler-rt.lock.json"));
     const char *url = jstr(lock, "url");
     char *archive = PJ(o->root, ".cache", "downloads", last_segment(url));
@@ -901,85 +901,7 @@ static char *prepare_dsymutil(const Opts *o, const char *ndir, const char *llvm,
     } else if (seed) {
         recipe_tblgen(o, seed, dir, tg, helper, &receipt);
     } else {
-        /* Build an option-parser-only upstream llvm-tblgen. TableGenBasic supplies
-         * the upstream main implementation; no hand-authored C++ helper is needed. */
-        memset(&cmd, 0, sizeof cmd);
-        strs_add(&cmd, cxx);
-        for (int i = 0; i < flags->n; i++) {
-            if (strcmp(flags->v[i], "-c") != 0) strs_add(&cmd, flags->v[i]);
-        }
-        strs_addf(&cmd, "-I%s", PJ(llvm, "include"));
-        strs_addf(&cmd, "-I%s", tg);
-        strs_add(&cmd, PJ(tg, "llvm-tblgen.cpp"));
-        strs_add(&cmd, PJ(tg, "OptionParserEmitter.cpp"));
-        if (IS_LINUX) strs_add(&cmd, "-Wl,--start-group");
-        static const char *const tglibs[] = {"LLVMTableGenBasic", "LLVMTableGenCommon", "LLVMTableGen", "LLVMSupport", "LLVMDemangle", NULL};
-        for (int i = 0; tglibs[i]; i++) {
-            if (!strcmp(tglibs[i], "LLVMSupport") && *support_override) strs_add(&cmd, support_override);
-            else strs_add(&cmd, static_lib(PJ(llvm, "lib"), tglibs[i]));
-        }
-        if (IS_LINUX) {
-            strs_add(&cmd, "-Wl,--end-group");
-            Json *nat = jobj(json_load(PJ(o->root, "toolchain.lock.json")), "native");
-            Json *sys = jarr_opt(nat, "system_libs");
-            for (int i = 0; sys && i < sys->n; i++) strs_add(&cmd, sys->items[i]->str);
-        } else {
-            /* Preserve quoted SDK paths (notably Windows user directories) rather
-             * than splitting a linker-flags string at spaces. */
-            char *rsp = PJ(gen, "external-flags.rsp");
-            char *rsp_flags = xstrdup(external_flags);
-            if (IS_WIN) {
-                /* llvm-config emits linker library names, not Clang driver inputs.
-                 * Preserve quoted paths; only bare name.lib tokens need -lname. */
-                Buf sb = {0};
-                const char *p = external_flags;
-                while (*p) {
-                    if (*p == ' ') {
-                        buf_char(&sb, ' ');
-                        p++;
-                        continue;
-                    }
-                    const char *j = p;
-                    int quoted = 0;
-                    while (*j && (quoted || *j != ' ')) {
-                        if (*j == '"') quoted = !quoted;
-                        j++;
-                    }
-                    char *tok = (char *)xmalloc((size_t)(j - p) + 1);
-                    memcpy(tok, p, (size_t)(j - p));
-                    tok[j - p] = 0;
-                    if (ends_with(tok, ".lib") && !strpbrk(tok, "/\\\":")) {
-                        tok[strlen(tok) - 4] = 0;
-                        buf_addf(&sb, "-l%s", tok);
-                    } else {
-                        buf_str(&sb, tok);
-                    }
-                    p = j;
-                }
-                rsp_flags = (char *)buf_cstr(&sb);
-            }
-            write_file(rsp, rsp_flags);
-            buf_addf(&receipt, "input %s %s\n", sha256_file(rsp), rsp);
-            strs_addf(&cmd, "@%s", rsp);
-            if (IS_DARWIN) {
-                strs_add(&cmd, "-lc++");
-                char *lto = PJ(llvm, "lib", "libLTO.dylib");
-                if (exists(lto)) {
-                    strs_addf(&cmd, "-Wl,-lto_library,%s", lto);
-                    strs_addf(&cmd, "-Wl,-mllvm,-threads=%d", o->jobs);
-                }
-            }
-            /* This is the GNU-style Clang driver: -l searches SDK libraries;
-             * a bare name.lib would instead be treated as a file in the CWD. */
-            if (IS_WIN) {
-                static const char *const w[] = {"-lkernel32", "-ladvapi32", "-lshell32", "-lole32", "-luuid", "-lpsapi", "-lversion", "-lws2_32", "-lntdll", NULL};
-                strs_addv(&cmd, w);
-            }
-        }
-        strs_add(&cmd, "-o");
-        strs_add(&cmd, helper);
-        for (int i = 0; i < cmd.n; i++) buf_addf(&receipt, "generator-build-arg %s\n", cmd.v[i]);
-        must(o, o->root, &cmd);
+        fail("prepare_dsymutil: no seeded host recipe");
     }
     memset(&cmd, 0, sizeof cmd);
     strs_add(&cmd, helper);
@@ -1389,7 +1311,7 @@ static void prepare(Opts *o) {
     if (!fresh) {
         remove_file(stamp);
         prepare_version_sources(o, ndir, header);
-        prepare_dsymutil(o, ndir, c.llvm, NULL, "", "", NULL, &c);
+        prepare_dsymutil(o, ndir, c.llvm, &c);
     }
     if (c.auto_linux) write_selfhost(o, &c, NULL, NULL);
     mkdirs(PJ(ndir, "selfhost"));
@@ -1509,11 +1431,10 @@ int main(int argc, char **argv) {
             if (strcmp(o.profile, "debug") && strcmp(o.profile, "release")) fail("--profile must be debug or release");
         } else if (!strcmp(a, "--reference")) o.reference = 1;
         else if (starts_with(a, "--sdk=")) o.host_sdk = xstrdup(a + 6);
-        else if (!strcmp(a, "--llvm=pinned")) o.pinned = 1;
-        else if (!strcmp(a, "--llvm=system")) o.pinned = 0;
-        else if (starts_with(a, "-O") && a[2]) o.opt = xstrdup(a + 2);
+        else if (starts_with(a, "--llvm=")) fail("%s is obsolete: prepare always uses the pinned LLVM SDK (or LLVM_PREFIX)", a);
+        else if (starts_with(a, "-O")) fail("%s is obsolete: use --profile=debug|release", a);
         else if (starts_with(a, "--output=")) o.output = xstrdup(a + 9);
-        else if (starts_with(a, "--native-dir=")) o.native_dir = xstrdup(a + 13);
+        else if (starts_with(a, "--native-dir=")) fail("--native-dir is obsolete: set \"native-dir\" in a --host-config=FILE recipe");
         else if (starts_with(a, "--binary=")) o.binary = xstrdup(a + 9);
         else if (starts_with(a, "--upstream=")) o.upstream = xstrdup(a + 11);
         else if (starts_with(a, "--target=")) o.target = xstrdup(a + 9);
