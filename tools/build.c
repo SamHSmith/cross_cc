@@ -1,71 +1,38 @@
-/* cross_cc setup/build tool. Plain C; bootstrap with the system C compiler:
- *   cc -O1 -o tools/build tools/build.c && tools/build <setup|build|native|test|package|help> [options]
- * The Makefile at the repository root does exactly that. */
+/* cross_cc setup/build tool. Plain C, compiled by the launcher with the
+ * selected seed: <seed> cc -O1 -o build/tools/build tools/build.c, then
+ * build/tools/build [command] --compiler=<seed>. */
 #include "common.h"
 #include "windows_path/windows_path.c"
 
 static const char USAGE[] =
-    "cross_cc build tool\n"
+    "cross_cc build tool (normally run through the launcher, which selects the seed)\n"
     "\n"
-    "usage: build/tools/build <command> [options]\n"
-    "       (bootstrap: `make tools`, or cc -O1 -o build/tools/build tools/build.c)\n"
+    "usage: build/tools/build [command] --compiler=/abs/cross_cc [options]   (default command: build)\n"
     "\n"
     "commands:\n"
-    "  resources download + SHA-256 verify the pinned source archive and populate lib/.\n"
-    "          Reuses extracted resources or verified .cache/downloads offline.\n"
-    "  setup   prepare resources, compiler-rt and libbacktrace sources;\n"
-    "          --llvm=pinned also prepares the native backend.\n"
-    "  build   compile the root main.c to bin/cross_cc and copy it to the argv0 aliases (cross_c++, cross_clang,\n"
-    "          ld.lld, ld64.lld, lld-link, wasm-ld, llvm-ar, llvm-ranlib); links the static backend\n"
-    "          flags written by native (argv0 mode). No network; fails if native has not been run.\n"
-    "  native  build the in-process Clang/LLD/LLVM backend archive from the checked-in\n"
-    "          deps/llvm-bridge sources + official static LLVM libs (~2GB download):\n"
-    "          .cache/native/libcross_cc_backend.a and .cache/native/linker-flags.txt\n"
-    "          (entries: BridgeClang_main, BridgeLlvmAr_main, cross_cc_dsymutil_main,\n"
-    "          BridgeLLDLink{ELF,COFF,Wasm,MachO,MinGW}).\n"
-    "          Uses clang++ (CXX overrides it); --jobs parallel compiles. Windows needs an MSVC developer shell.\n"
-    "          Windows also authenticates and compiles upstream LLVM Path.cpp with\n"
-    "          LLVM_WINDOWS_PREFER_FORWARD_SLASH=1, linked before LLVMSupport. build\n"
-    "          enables canonical resources only with its matching object/flags receipt;\n"
-    "          unknown backend flags conservatively stay physical.\n"
-    "  test    run tools/windows_path tests and every tests/*_test.c unit program, then the\n"
-    "          integration programs tests/smoke.c and tests/*_integration.c (need built binaries and\n"
-    "          the reference compiler binary from `setup --reference`).\n"
-    "  package assemble a runtime bundle with executable, lib/, vendor/ and licenses/\n"
-    "  help\n"
+    "  resources    download + SHA-256 verify the pinned source archive and populate lib/\n"
+    "  setup        resources plus compiler-rt and libbacktrace sources (--reference: test binary)\n"
+    "  prepare      setup, the pinned host LLVM SDK, the GNU-ABI support SDK (linux-release-deps),\n"
+    "               native-dir sources and the host recipe .cache/native/selfhost.json; every\n"
+    "               compilation uses the seed only (linux-amd64 hosts)\n"
+    "  build        prepare, then the staged release pipeline publishes bin/cross_cc\n"
+    "               (--profile=debug|release) and the argv0 alias copies\n"
+    "  release      prepare, then the release tool with every other --key=value forwarded\n"
+    "  test         unit programs (compiled by the seed), then integration tests of bin/cross_cc\n"
+    "  package      stage bin/cross_cc + lib/ into build/dist (--target, --single-executable,\n"
+    "               --extra-licenses, --msvc-helper, --upstream, --binary)\n"
+    "  tools        recompile the sibling helper tools with the seed\n"
+    "  check-tools  compile every tool with -Wall using the seed and run the path helper tests\n"
+    "  native       legacy: backend archive with a system C++ compiler (CXX); not used by build\n"
+    "  help         this text\n"
     "\n"
-    "options:\n"
-    "  --reference     setup: also fetch the reference compiler binary (tests only)\n"
-    "  --native-dir=DIR native: private output directory (default .cache/native)\n"
-    "  --jobs=N        setup/native/build/test: parallel compiles\n"
-    "                  (default: processor core count)\n"
-    "  --llvm=pinned   setup: also download static LLVM and build the native bridge;\n"
-    "                  native: use the downloaded clang++ instead of the system C++ compiler\n"
-    "  --llvm=system   (default) build the bridge with the installed clang++.\n"
-    "                  The embedded frontend is always pinned LLVM/Clang 22.1.8.\n"
-    "  -O<level>       build: C optimization level for the driver (default 2)\n"
-    "  --target=KEY    package: artifact platform (default host, not used by build/native)\n"
-    "  --binary=FILE   package: use this built cross_cc executable\n"
-    "  --output=DIR    package: destination directory (default dist/cross_cc-<target>)\n"
-    "  --upstream=DIR  package: upstream source cache (default .cache/upstream)\n"
-    "  --single-executable package: omit argv0 alias copies\n"
-    "  --extra-licenses=DIR package: linked support SDK notices, copied under licenses/dependencies/\n"
-    "  --msvc-helper=DIR package: pinned xwin, LICENSE-APACHE/MIT, Cargo.lock, dependency-notices.json,\n"
-    "                    nonempty dependency-notices/, rust-std-notices/{LICENSE-APACHE,LICENSE-MIT,COPYRIGHT},\n"
-    "                    and sbom.spdx.json or build-provenance.txt; required for bundled-only host pins\n"
-    "                    (Darwin arm64 and Windows amd64 managed MSVC; never the Microsoft SDK)\n"
-    "\n"
-    "environment:\n"
-    "  LLVM_PREFIX  existing LLVM 22.1.8 prefix with headers + static Clang/LLD/LLVM libs\n"
-    "  CXX          bridge C++ compiler (default clang++, or downloaded clang on Windows)\n"
-    "  CC           C compiler for the driver (default cc)\n"
-    "  ZSTD_LIBRARY macOS: absolute libzstd.a path if LLVM's recorded path is unavailable\n"
-    "  XML2_LIBRARY Windows: absolute static /MT xml2s.lib path (default LLVM_PREFIX/lib,\n"
-    "               else setup builds the pinned libxml2 into .cache/native)\n"
+    "options: --compiler=FILE --profile=debug|release --jobs=N --deps-prefix=DIR (existing\n"
+    "  linux-release-deps prefix, verified not rebuilt) --reference --native-dir=DIR (native)\n"
+    "environment: LLVM_PREFIX (LLVM 22.1.8 static SDK instead of the pinned archive),\n"
+    "  CROSS_CC_SEED_ROOT (seed resources; else found above the seed binary)\n"
     "\n"
     "All temp/cache/build output stays under .cache/ and build/ (TMPDIR=.cache/tmp).\n"
-    "Pins: upstream.lock.json (lib/ sources, test reference binary, libbacktrace),\n"
-    "toolchain.lock.json (LLVM). Generated lib/ resources are not tracked in Git.\n";
+    "Pins: upstream.lock.json, toolchain.lock.json, compiler-rt.lock.json.\n";
 
 typedef struct {
     char *root;
@@ -81,6 +48,12 @@ typedef struct {
     char *extra_licenses; /* package only: notices for explicitly selected support SDK */
     char *msvc_helper;    /* package only: authenticated helper directory with notices */
     int jobs;
+    char *compiler;    /* --compiler: absolute selected seed cross_cc */
+    char *seed_root;   /* its packaged resources (require_seed) */
+    char *profile;     /* --profile=debug|release, forwarded to the release pipeline */
+    char *deps_prefix; /* --deps-prefix: existing linux-release-deps prefix (verified, not rebuilt) */
+    char *self_dir;    /* directory of this executable: sibling release/deps helpers */
+    Strs forward;      /* release: options forwarded verbatim to the release tool */
 } Opts;
 
 static const char *const ALIASES[] = {"cross_c++", "cross_clang", "ld.lld", "ld64.lld", "lld-link", "wasm-ld", "llvm-ar", "llvm-ranlib", NULL};
@@ -154,20 +127,6 @@ static const char *host_key(void) {
 }
 
 static void native(Opts *o);
-
-static void report_llvm(const Opts *o, const char *want) {
-    char *argv[] = {"clang", "--version", NULL};
-    char *out;
-    Strs env = base_env(o);
-    if (run_capture(argv, NULL, env.v, &out) != 0) {
-        fprintf(stderr, "warning: no clang found; install clang or run setup --llvm=pinned\n");
-        return;
-    }
-    Strs lines = split_lines(out);
-    char *line = lines.n ? trim(lines.v[0]) : xstrdup("");
-    if (contains(line, want)) printf("clang: %s\n", line);
-    else fprintf(stderr, "warning: LLVM version mismatch: using [%s], pinned clang is %s (patch-level difference; --llvm=pinned fetches %s)\n", line, want, want);
-}
 
 /* Only setup/resources acquires source dependencies. Build/package stay offline.
  * The receipt binds the extracted cache to both the archive and selection recipe.
@@ -307,67 +266,79 @@ static void setup(Opts *o) {
         printf("compiler-rt sources ready (%s)\n", crtdir);
     }
 
-    if (o->pinned) native(o);
-    else report_llvm(o, "22.1.8");
 }
 
-static char *cc_bin(void) {
-    const char *e = env_get("CC");
-    return xstrdup(*e ? e : "cc");
+/* ---- the selected seed compiler (never a system cc/clang/ld/ar/make) ---- */
+static const char *const SEED_DROP[] = {"TMPDIR", "TMP", "TEMP", "CROSS_CC_ROOT", "CROSS_CC_LIB_DIR", "CROSS_CC_MSVC", "CROSS_CC_CACHE_DIR", "ZIG_LIB_DIR", "ZIG_GLOBAL_CACHE_DIR", "ZIG_LOCAL_CACHE_DIR", "ZIG_LIBC", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "LIBRARY_PATH", "CCC_OVERRIDE_OPTIONS", "SDKROOT", "CC", "CXX", "LD", "AR", "CFLAGS", "CXXFLAGS", "LDFLAGS", NULL};
+
+static int seed_root_ok(const char *d) { return exists(PJ(d, "upstream.lock.json")) && is_dir(PJ(d, "lib", "include")) && is_dir(PJ(d, "lib", "libc")); }
+
+static char *real_or_abs(const char *p) {
+#ifndef _WIN32
+    char *r = realpath(p, NULL);
+    if (r) return r;
+#endif
+    return abs_path(p);
 }
 
-/* Compile the root C package. main.c is the unity translation unit; the backend
- * archive and the LLVM libraries come from linker-flags.txt. */
-static void build(Opts *o) {
-    require_resources(o);
-    mkdirs(PJ(o->root, ".cache", "tmp"));
-    mkdirs(PJ(o->root, "build"));
-    mkdirs(PJ(o->root, "bin"));
-    char *out = PJ(o->root, "bin", sfmt("cross_cc%s", EXE_SUFFIX));
-    char *main_c = PJ(o->root, "main.c");
-    if (!is_file(main_c)) fail("%s missing", main_c);
-    char *ff = PJ(o->root, ".cache", "native", "linker-flags.txt");
-    if (o->native_dir) ff = PJ(o->native_dir, "linker-flags.txt");
-    if (!exists(ff)) fail("embedded compiler backend missing; run the build tool's native command first");
-    Strs cmd = {0};
-    strs_add(&cmd, cc_bin());
-    strs_add(&cmd, "-std=c11");
-    strs_addf(&cmd, "-O%s", o->opt);
-    strs_add(&cmd, "-DNDEBUG");
-    strs_addf(&cmd, "-I%s", PJ(o->root, "src"));
-    if (!strcmp(HOST_OS, "windows")) {
-        char *ndir = o->native_dir ? o->native_dir : PJ(o->root, ".cache", "native");
-        if (wp_verified(PJ(ndir, "windows-path"), PJ(ndir, "obj", "llvm-WindowsPath.cpp.o"), ff)) {
-            strs_add(&cmd, "-DCROSS_CC_WINDOWS_CANONICAL_PATHS=1");
-        } else {
-            fprintf(stderr, "build: Windows backend lacks a matching forward-path receipt; canonical resources disabled (re-run native to enable)\n");
+/* Validate --compiler and find its own packaged resources: CROSS_CC_SEED_ROOT
+ * (exported by the launcher), else the nearest ancestor of the resolved binary
+ * holding upstream.lock.json + lib/. Never the checkout's resources. */
+static void require_seed(Opts *o) {
+    if (o->seed_root) return;
+    if (!o->compiler || !*o->compiler) fail("%s: pass --compiler=FILE (the selected cross_cc seed; the launcher does this)", tool_name);
+    if (!is_abs(o->compiler)) fail("--compiler must be an absolute path, got %s", o->compiler);
+    if (!is_file(o->compiler)) fail("--compiler %s does not exist", o->compiler);
+    const char *e = env_get("CROSS_CC_SEED_ROOT");
+    if (*e) {
+        if (!seed_root_ok(e)) fail("CROSS_CC_SEED_ROOT=%s lacks upstream.lock.json and lib/", e);
+        o->seed_root = real_or_abs(e);
+        return;
+    }
+    char *d = path_dir(real_or_abs(o->compiler));
+    for (int i = 0; i < 4; i++) {
+        if (seed_root_ok(d)) {
+            o->seed_root = d;
+            return;
         }
+        if (seed_root_ok(PJ(d, "share", "cross_cc"))) {
+            o->seed_root = PJ(d, "share", "cross_cc");
+            return;
+        }
+        char *up = path_dir(d);
+        if (!strcmp(up, d)) break;
+        d = up;
     }
-    strs_add(&cmd, main_c);
-    strs_add(&cmd, "-o");
-    strs_add(&cmd, out);
-    /* The backend archive is C++: link it with the C++ runtime listed in the flags. */
-    Strs link = split_quoted(read_file(ff, NULL));
-    strs_cat(&cmd, &link);
-    if (!strcmp(HOST_OS, "linux")) {
-        strs_add(&cmd, "-lstdc++");
-        strs_add(&cmd, "-lm");
-    }
-    must(o, o->root, &cmd);
-    for (int i = 0; ALIASES[i]; i++) {
-        char *dst = PJ(o->root, "bin", sfmt("%s%s", ALIASES[i], EXE_SUFFIX));
-        remove_file(dst);
-        copy_file(dst, out);
-    }
-    printf("built bin/cross_cc plus alias copies (argv0 selects mode)\n");
+    fail("cannot find resources of seed %s (upstream.lock.json + lib/ in an ancestor); set CROSS_CC_SEED_ROOT", o->compiler);
 }
+
+/* Environment for anything the seed runs: no ambient compiler/resource
+ * overrides; resources from the seed's own package; caches under .cache. */
+static Strs seed_env(const Opts *o) {
+    Strs extra = {0};
+    strs_addf(&extra, "TMPDIR=%s", PJ(o->root, ".cache", "tmp"));
+    strs_addf(&extra, "CROSS_CC_ROOT=%s", o->seed_root);
+    strs_addf(&extra, "CROSS_CC_CACHE_DIR=%s", PJ(o->root, ".cache", "seed-cc"));
+    return make_env(SEED_DROP, &extra);
+}
+static void seed_must(const Opts *o, const char *cwd, Strs *cmd) {
+    Strs env = seed_env(o);
+    mkdirs(PJ(o->root, ".cache", "tmp"));
+    int code = run_cmd(cmd->v, cwd, env.v);
+    if (code != 0) fail("%s failed (exit %d)", cmd->v[0], code);
+}
+
+static void prepare(Opts *o);
+static void build(Opts *o);
 
 /* Compile one standalone C test program and run it from the checkout root. */
 static void run_c_test(Opts *o, const char *source, const char *name) {
     mkdirs(PJ(o->root, "build", "tests"));
     char *exe = PJ(o->root, "build", "tests", sfmt("%s%s", name, EXE_SUFFIX));
+    require_seed(o);
     Strs cmd = {0};
-    strs_add(&cmd, cc_bin());
+    strs_add(&cmd, o->compiler);
+    strs_add(&cmd, "cc");
     strs_add(&cmd, "-std=c11");
     strs_add(&cmd, "-O1");
     strs_addf(&cmd, "-I%s", PJ(o->root, "src"));
@@ -376,7 +347,7 @@ static void run_c_test(Opts *o, const char *source, const char *name) {
     strs_add(&cmd, "-o");
     strs_add(&cmd, exe);
     printf("test: build %s\n", name);
-    must(o, o->root, &cmd);
+    seed_must(o, o->root, &cmd);
     Strs run_line = {0};
     strs_add(&run_line, exe);
     if (ends_with(source, "_integration.c")) {
@@ -397,6 +368,14 @@ static void run_c_test(Opts *o, const char *source, const char *name) {
  * unit program (no binaries needed), then the integration programs that drive
  * the built bin/cross_cc: tests/smoke.c and every tests/ *_integration.c. */
 static void test(Opts *o) {
+    require_seed(o);
+    /* Tests that drive a raw clang use the checkout's alias, never a system clang. */
+    char *clang = PJ(o->root, "bin", sfmt("cross_clang%s", EXE_SUFFIX));
+#ifdef _WIN32
+    _putenv_s("CLANG", clang);
+#else
+    setenv("CLANG", clang, 1);
+#endif
     char *wp_src = PJ(o->root, "tools", "windows_path", "windows_path_test.c");
     if (exists(wp_src)) run_c_test(o, wp_src, "windows_path_test");
     Strs names = {0};
@@ -410,6 +389,30 @@ static void test(Opts *o) {
         }
     }
     printf("test: %d unit programs passed\n", units);
+    /* Seeded support-SDK check: only once prepare has built the default prefix. */
+    char *sd_src = PJ(tests, "support_deps_check.c");
+    char *sd_prefix = PJ(o->root, ".cache", "linux-release-deps");
+    if (is_file(sd_src) && !strcmp(host_key(), "linux-amd64") && is_file(PJ(sd_prefix, "complete.sha256"))) {
+        char *exe = PJ(o->root, "build", "tests", "support_deps_check");
+        Strs cc = {0};
+        strs_add(&cc, o->compiler);
+        strs_add(&cc, "cc");
+        strs_add(&cc, "-std=c11");
+        strs_add(&cc, "-O1");
+        strs_add(&cc, "-o");
+        strs_add(&cc, exe);
+        strs_add(&cc, sd_src);
+        seed_must(o, o->root, &cc);
+        char *work = PJ(o->root, "build", "tests", "support-deps");
+        mkdirs(work);
+        Strs line = {0};
+        strs_add(&line, exe);
+        strs_add(&line, o->compiler);
+        strs_add(&line, sd_prefix);
+        strs_add(&line, work);
+        printf("test: run support_deps_check\n");
+        seed_must(o, o->root, &line);
+    }
     static const char *const needed[] = {"cross_cc", "cross_c++", NULL};
     for (int i = 0; needed[i]; i++) {
         if (!exists(PJ(o->root, "bin", sfmt("%s%s", needed[i], EXE_SUFFIX)))) fail("bin/%s%s missing: run `build` first", needed[i], EXE_SUFFIX);
@@ -803,11 +806,117 @@ static char *prepare_libxml2(const Opts *o, const char *ndir, const char *cxx, c
     return lib;
 }
 
+/* ---- seeded Linux host recipe (GNU ABI: the pinned LLVM SDK is libstdc++-built) ----
+ * The same argument lists feed the checked recipe files the release pipeline
+ * reads (placeholders) and the option-table generator prepare builds itself. */
+static const char *const HOST_GLIBC = "2.34";
+static const char *const HOST_CPU = "x86-64-v2";
+static const char *const HOST_CXX_HEADERS[] = {"sysroot/usr/include/c++/12", "sysroot/usr/include/x86_64-linux-gnu/c++/12", "sysroot/usr/include/c++/12/backward", NULL};
+static const char *const HOST_C_HEADERS[] = {"lib/include", "lib/libc/include/x86-linux-gnu", "lib/libc/include/generic-glibc", "lib/libc/include/x86-linux-any", "lib/libc/include/any-linux-any", NULL};
+static const char *const HOST_SDK_LIBS[] = {"libz.a", "libzstd.a", "libxml2.a", NULL};
+static const char *const HOST_CXX_RUNTIME[] = {"libstdc++.a", "libgcc_eh.a", "libgcc.a", NULL};
+static const char *const HOST_SYSTEM_LIBS[] = {"-lm", "-lpthread", "-ldl", "-lrt", NULL};
+
+/* Raw-clang bridge flags: explicit libstdc++ headers from the pinned
+ * libstdc++-12-dev, then the compiler's builtin and glibc headers. */
+static Strs host_bridge_args(const char *sdk, const char *root) {
+    Strs a = {0};
+    strs_add(&a, "-nostdinc");
+    for (int i = 0; HOST_CXX_HEADERS[i]; i++) {
+        strs_add(&a, "-isystem");
+        strs_addf(&a, "%s/%s", sdk, HOST_CXX_HEADERS[i]);
+    }
+    for (int i = 0; HOST_C_HEADERS[i]; i++) {
+        strs_add(&a, "-isystem");
+        strs_addf(&a, "%s/%s", root, HOST_C_HEADERS[i]);
+    }
+    strs_addf(&a, "-D__GLIBC_MINOR__=%s", strchr(HOST_GLIBC, '.') + 1);
+    strs_add(&a, "-fPIC");
+    return a;
+}
+
+/* Everything after the LLVM archive group: support libraries, the explicit
+ * GNU C++ runtime archives (never -lstdc++, which cross_cc maps to libc++),
+ * and glibc libraries the cc driver provides for the pinned glibc. */
+static void host_runtime_args(Strs *a, const char *sdk) {
+    for (int i = 0; HOST_SDK_LIBS[i]; i++) strs_addf(a, "%s/lib/%s", sdk, HOST_SDK_LIBS[i]);
+    strs_add(a, "-Wl,--start-group");
+    for (int i = 0; HOST_CXX_RUNTIME[i]; i++) strs_addf(a, "%s/lib/%s", sdk, HOST_CXX_RUNTIME[i]);
+    strs_add(a, "-Wl,--end-group");
+    strs_addv(a, HOST_SYSTEM_LIBS);
+}
+
+static void check_host_sdk(const char *sdk) {
+    for (int i = 0; HOST_CXX_HEADERS[i]; i++) {
+        if (!is_dir(PJ(sdk, HOST_CXX_HEADERS[i]))) fail("host SDK %s lacks %s (libstdc++-12-dev headers)", sdk, HOST_CXX_HEADERS[i]);
+    }
+    const char *const *lists[] = {HOST_SDK_LIBS, HOST_CXX_RUNTIME};
+    for (int k = 0; k < 2; k++) {
+        for (int i = 0; lists[k][i]; i++) {
+            if (!is_file(PJ(sdk, "lib", lists[k][i]))) fail("host SDK %s lacks lib/%s", sdk, lists[k][i]);
+        }
+    }
+}
+
+/* Seed aliases (argv0 selects the mode) in .cache/seed-tools. */
+static char *seed_alias(const Opts *o, const char *name) {
+    char *dir = PJ(o->root, ".cache", "seed-tools");
+    mkdirs(dir);
+    char *dst = PJ(dir, sfmt("%s%s", name, EXE_SUFFIX));
+    remove_file(dst);
+#ifndef _WIN32
+    if (symlink(real_or_abs(o->compiler), dst) == 0) return dst;
+#endif
+    link_or_copy(dst, o->compiler);
+    return dst;
+}
+
+/* Build the option-parser llvm-tblgen with the seed: raw cross_clang for the
+ * two upstream sources, the seed's cc driver for the GNU-ABI link. */
+static void seeded_tblgen(const Opts *o, const char *dir, const char *tg, const char *llvm, const char *sdk, const char *helper, Buf *receipt) {
+    char *clang = seed_alias(o, "cross_clang");
+    Strs bridge = host_bridge_args(sdk, o->seed_root);
+    static const char *const flags[] = {"--no-default-config", "-std=c++17", "-O2", "-w", "-c", "-fno-exceptions", "-fno-rtti", "-D__STDC_CONSTANT_MACROS", "-D__STDC_FORMAT_MACROS", "-D__STDC_LIMIT_MACROS", "-DLLVM_BUILD_STATIC", "--target=x86_64-unknown-linux-gnu", NULL};
+    static const char *const srcs[] = {"llvm-tblgen.cpp", "OptionParserEmitter.cpp", NULL};
+    char *objd = PJ(dir, "tblgen-obj");
+    mkdirs(objd);
+    Strs link = {0};
+    strs_add(&link, o->compiler);
+    strs_add(&link, "cc");
+    strs_addf(&link, "-target");
+    strs_addf(&link, "x86_64-linux-gnu.%s", HOST_GLIBC);
+    for (int i = 0; srcs[i]; i++) {
+        Strs cmd = {0};
+        strs_add(&cmd, clang);
+        strs_addv(&cmd, flags);
+        strs_addf(&cmd, "-march=%s", HOST_CPU);
+        strs_cat(&cmd, &bridge);
+        strs_addf(&cmd, "-I%s", PJ(llvm, "include"));
+        strs_addf(&cmd, "-I%s", tg);
+        char *obj = PJ(objd, sfmt("%s.o", srcs[i]));
+        strs_add(&cmd, "-o");
+        strs_add(&cmd, obj);
+        strs_add(&cmd, PJ(tg, srcs[i]));
+        for (int k = 0; k < cmd.n; k++) buf_addf(receipt, "generator-compile-arg %s\n", cmd.v[k]);
+        seed_must(o, o->root, &cmd);
+        strs_add(&link, obj);
+    }
+    strs_add(&link, "-Wl,--start-group");
+    static const char *const tglibs[] = {"LLVMTableGenBasic", "LLVMTableGenCommon", "LLVMTableGen", "LLVMSupport", "LLVMDemangle", NULL};
+    for (int i = 0; tglibs[i]; i++) strs_add(&link, static_lib(PJ(llvm, "lib"), tglibs[i]));
+    strs_add(&link, "-Wl,--end-group");
+    host_runtime_args(&link, sdk);
+    strs_add(&link, "-o");
+    strs_add(&link, helper);
+    for (int k = 0; k < link.n; k++) buf_addf(receipt, "generator-build-arg %s\n", link.v[k]);
+    seed_must(o, o->root, &link);
+}
+
 /* Unchanged pinned LLVM dependency sources. The only generated C++ is LLVM's
  * own driver template; all dependency orchestration and dispatch remain C. */
 static const char *const DSYMUTIL_SOURCES[] = {"dsymutil.cpp", "BinaryHolder.cpp", "CFBundle.cpp", "DebugMap.cpp", "DwarfLinkerForBinary.cpp", "MachODebugMapParser.cpp", "MachOUtils.cpp", "Reproducer.cpp", "RelocationMap.cpp", "SwiftModule.cpp", NULL};
 
-static char *prepare_dsymutil(const Opts *o, const char *ndir, const char *llvm, const char *cxx, const char *external_flags, const char *support_override, const Strs *flags) {
+static char *prepare_dsymutil(const Opts *o, const char *ndir, const char *llvm, const char *cxx, const char *external_flags, const char *support_override, const Strs *flags, const char *seed_sdk) {
     Json *lock = json_load(PJ(o->root, "compiler-rt.lock.json"));
     const char *url = jstr(lock, "url");
     char *archive = PJ(o->root, ".cache", "downloads", last_segment(url));
@@ -839,86 +948,90 @@ static char *prepare_dsymutil(const Opts *o, const char *ndir, const char *llvm,
     write_file(PJ(gen, "llvm", "Config", "config.h"), "#include \"llvm/Config/llvm-config.h\"\n");
     Buf receipt = {0};
     buf_addf(&receipt, "recipe llvm-dsymutil-v1\narchive-sha256 %s\nextract strip-components=1 llvm/tools/dsymutil llvm/utils/TableGen/{llvm-tblgen.cpp,OptionParserEmitter.cpp,Basic,Common} llvm/cmake/modules/llvm-driver-template.cpp.in\n", jstr(lock, "sha256"));
-    /* Build an option-parser-only upstream llvm-tblgen. TableGenBasic supplies
-     * the upstream main implementation; no hand-authored C++ helper is needed. */
-    memset(&cmd, 0, sizeof cmd);
-    strs_add(&cmd, cxx);
-    for (int i = 0; i < flags->n; i++) {
-        if (strcmp(flags->v[i], "-c") != 0) strs_add(&cmd, flags->v[i]);
-    }
-    strs_addf(&cmd, "-I%s", PJ(llvm, "include"));
-    strs_addf(&cmd, "-I%s", tg);
-    strs_add(&cmd, PJ(tg, "llvm-tblgen.cpp"));
-    strs_add(&cmd, PJ(tg, "OptionParserEmitter.cpp"));
-    if (IS_LINUX) strs_add(&cmd, "-Wl,--start-group");
-    static const char *const tglibs[] = {"LLVMTableGenBasic", "LLVMTableGenCommon", "LLVMTableGen", "LLVMSupport", "LLVMDemangle", NULL};
-    for (int i = 0; tglibs[i]; i++) {
-        if (!strcmp(tglibs[i], "LLVMSupport") && *support_override) strs_add(&cmd, support_override);
-        else strs_add(&cmd, static_lib(PJ(llvm, "lib"), tglibs[i]));
-    }
-    if (IS_LINUX) {
-        strs_add(&cmd, "-Wl,--end-group");
-        Json *nat = jobj(json_load(PJ(o->root, "toolchain.lock.json")), "native");
-        Json *sys = jarr_opt(nat, "system_libs");
-        for (int i = 0; sys && i < sys->n; i++) strs_add(&cmd, sys->items[i]->str);
-    } else {
-        /* Preserve quoted SDK paths (notably Windows user directories) rather
-         * than splitting a linker-flags string at spaces. */
-        char *rsp = PJ(gen, "external-flags.rsp");
-        char *rsp_flags = xstrdup(external_flags);
-        if (IS_WIN) {
-            /* llvm-config emits linker library names, not Clang driver inputs.
-             * Preserve quoted paths; only bare name.lib tokens need -lname. */
-            Buf sb = {0};
-            const char *p = external_flags;
-            while (*p) {
-                if (*p == ' ') {
-                    buf_char(&sb, ' ');
-                    p++;
-                    continue;
-                }
-                const char *j = p;
-                int quoted = 0;
-                while (*j && (quoted || *j != ' ')) {
-                    if (*j == '"') quoted = !quoted;
-                    j++;
-                }
-                char *tok = (char *)xmalloc((size_t)(j - p) + 1);
-                memcpy(tok, p, (size_t)(j - p));
-                tok[j - p] = 0;
-                if (ends_with(tok, ".lib") && !strpbrk(tok, "/\\\":")) {
-                    tok[strlen(tok) - 4] = 0;
-                    buf_addf(&sb, "-l%s", tok);
-                } else {
-                    buf_str(&sb, tok);
-                }
-                p = j;
-            }
-            rsp_flags = (char *)buf_cstr(&sb);
-        }
-        write_file(rsp, rsp_flags);
-        buf_addf(&receipt, "input %s %s\n", sha256_file(rsp), rsp);
-        strs_addf(&cmd, "@%s", rsp);
-        if (IS_DARWIN) {
-            strs_add(&cmd, "-lc++");
-            char *lto = PJ(llvm, "lib", "libLTO.dylib");
-            if (exists(lto)) {
-                strs_addf(&cmd, "-Wl,-lto_library,%s", lto);
-                strs_addf(&cmd, "-Wl,-mllvm,-threads=%d", o->jobs);
-            }
-        }
-        /* This is the GNU-style Clang driver: -l searches SDK libraries;
-         * a bare name.lib would instead be treated as a file in the CWD. */
-        if (IS_WIN) {
-            static const char *const w[] = {"-lkernel32", "-ladvapi32", "-lshell32", "-lole32", "-luuid", "-lpsapi", "-lversion", "-lws2_32", "-lntdll", NULL};
-            strs_addv(&cmd, w);
-        }
-    }
     char *helper = PJ(dir, sfmt("llvm-opt-tblgen%s", EXE_SUFFIX));
-    strs_add(&cmd, "-o");
-    strs_add(&cmd, helper);
-    for (int i = 0; i < cmd.n; i++) buf_addf(&receipt, "generator-build-arg %s\n", cmd.v[i]);
-    must(o, o->root, &cmd);
+    if (seed_sdk) {
+        seeded_tblgen(o, dir, tg, llvm, seed_sdk, helper, &receipt);
+    } else {
+        /* Build an option-parser-only upstream llvm-tblgen. TableGenBasic supplies
+         * the upstream main implementation; no hand-authored C++ helper is needed. */
+        memset(&cmd, 0, sizeof cmd);
+        strs_add(&cmd, cxx);
+        for (int i = 0; i < flags->n; i++) {
+            if (strcmp(flags->v[i], "-c") != 0) strs_add(&cmd, flags->v[i]);
+        }
+        strs_addf(&cmd, "-I%s", PJ(llvm, "include"));
+        strs_addf(&cmd, "-I%s", tg);
+        strs_add(&cmd, PJ(tg, "llvm-tblgen.cpp"));
+        strs_add(&cmd, PJ(tg, "OptionParserEmitter.cpp"));
+        if (IS_LINUX) strs_add(&cmd, "-Wl,--start-group");
+        static const char *const tglibs[] = {"LLVMTableGenBasic", "LLVMTableGenCommon", "LLVMTableGen", "LLVMSupport", "LLVMDemangle", NULL};
+        for (int i = 0; tglibs[i]; i++) {
+            if (!strcmp(tglibs[i], "LLVMSupport") && *support_override) strs_add(&cmd, support_override);
+            else strs_add(&cmd, static_lib(PJ(llvm, "lib"), tglibs[i]));
+        }
+        if (IS_LINUX) {
+            strs_add(&cmd, "-Wl,--end-group");
+            Json *nat = jobj(json_load(PJ(o->root, "toolchain.lock.json")), "native");
+            Json *sys = jarr_opt(nat, "system_libs");
+            for (int i = 0; sys && i < sys->n; i++) strs_add(&cmd, sys->items[i]->str);
+        } else {
+            /* Preserve quoted SDK paths (notably Windows user directories) rather
+             * than splitting a linker-flags string at spaces. */
+            char *rsp = PJ(gen, "external-flags.rsp");
+            char *rsp_flags = xstrdup(external_flags);
+            if (IS_WIN) {
+                /* llvm-config emits linker library names, not Clang driver inputs.
+                 * Preserve quoted paths; only bare name.lib tokens need -lname. */
+                Buf sb = {0};
+                const char *p = external_flags;
+                while (*p) {
+                    if (*p == ' ') {
+                        buf_char(&sb, ' ');
+                        p++;
+                        continue;
+                    }
+                    const char *j = p;
+                    int quoted = 0;
+                    while (*j && (quoted || *j != ' ')) {
+                        if (*j == '"') quoted = !quoted;
+                        j++;
+                    }
+                    char *tok = (char *)xmalloc((size_t)(j - p) + 1);
+                    memcpy(tok, p, (size_t)(j - p));
+                    tok[j - p] = 0;
+                    if (ends_with(tok, ".lib") && !strpbrk(tok, "/\\\":")) {
+                        tok[strlen(tok) - 4] = 0;
+                        buf_addf(&sb, "-l%s", tok);
+                    } else {
+                        buf_str(&sb, tok);
+                    }
+                    p = j;
+                }
+                rsp_flags = (char *)buf_cstr(&sb);
+            }
+            write_file(rsp, rsp_flags);
+            buf_addf(&receipt, "input %s %s\n", sha256_file(rsp), rsp);
+            strs_addf(&cmd, "@%s", rsp);
+            if (IS_DARWIN) {
+                strs_add(&cmd, "-lc++");
+                char *lto = PJ(llvm, "lib", "libLTO.dylib");
+                if (exists(lto)) {
+                    strs_addf(&cmd, "-Wl,-lto_library,%s", lto);
+                    strs_addf(&cmd, "-Wl,-mllvm,-threads=%d", o->jobs);
+                }
+            }
+            /* This is the GNU-style Clang driver: -l searches SDK libraries;
+             * a bare name.lib would instead be treated as a file in the CWD. */
+            if (IS_WIN) {
+                static const char *const w[] = {"-lkernel32", "-ladvapi32", "-lshell32", "-lole32", "-luuid", "-lpsapi", "-lversion", "-lws2_32", "-lntdll", NULL};
+                strs_addv(&cmd, w);
+            }
+        }
+        strs_add(&cmd, "-o");
+        strs_add(&cmd, helper);
+        for (int i = 0; i < cmd.n; i++) buf_addf(&receipt, "generator-build-arg %s\n", cmd.v[i]);
+        must(o, o->root, &cmd);
+    }
     memset(&cmd, 0, sizeof cmd);
     strs_add(&cmd, helper);
     strs_add(&cmd, "-gen-opt-parser-defs");
@@ -953,13 +1066,11 @@ static char *prepare_dsymutil(const Opts *o, const char *ndir, const char *llvm,
     return dir;
 }
 
-static void native(Opts *o) {
-    /* Checked-in C++ bridge sources (see deps/llvm-bridge/README.md). */
-    char *bridge_src = PJ(o->root, "deps", "llvm-bridge");
-    if (!is_dir(bridge_src)) fail("LLVM bridge sources missing at %s", bridge_src);
+/* Pinned host LLVM SDK (headers, static libraries, llvm-config): extracted
+ * from the verified archive into <ndir>/llvm unless LLVM_PREFIX names one.
+ * Never compiles anything. Returns the prefix; *header_out gets llvm-config.h. */
+static char *prepare_llvm_sdk(const Opts *o, const char *ndir, char **header_out) {
     Json *nat = jobj(json_load(PJ(o->root, "toolchain.lock.json")), "native");
-    char *ndir = o->native_dir ? xstrdup(o->native_dir) : PJ(o->root, ".cache", "native");
-    if (!is_abs(ndir)) ndir = PJ(o->root, ndir);
     char *llvm = xstrdup(env_get("LLVM_PREFIX"));
     if (*llvm && !is_abs(llvm)) llvm = PJ(o->root, llvm);
     int supplied = *llvm != 0;
@@ -1024,6 +1135,81 @@ static void native(Opts *o) {
         Json *arr = jarr_opt(nat, lib_keys[k]);
         for (int i = 0; arr && i < arr->n; i++) static_lib(libdir, arr->items[i]->str);
     }
+    (void)config;
+    *header_out = header;
+    return llvm;
+}
+
+/* Official clang/lld Version.cpp sources plus their generated headers under
+ * <ndir>/version, from the pinned llvm-project archive. Sources stay unmodified. */
+static void prepare_version_sources(const Opts *o, const char *ndir, const char *header) {
+    Json *crt = json_load(PJ(o->root, "compiler-rt.lock.json"));
+    const char *crt_url = jstr(crt, "url");
+    char *crt_archive = PJ(o->root, ".cache", "downloads", last_segment(crt_url));
+    char *vdir = PJ(ndir, "version");
+    char *vsrc = PJ(vdir, "clang", "lib", "Basic", "Version.cpp");
+    if (!exists(vsrc)) {
+        fetch(crt_url, jstr(crt, "sha256"), crt_archive);
+        char *vstage = PJ(ndir, ".version-stage");
+        remove_all(vstage);
+        mkdirs(vstage);
+        const char *pfx = jstr(crt, "strip_prefix");
+        must_l(o, o->root, "tar", "-xf", crt_archive, "-C", vstage, "--strip-components=1", sfmt("%s/clang/lib/Basic/Version.cpp", pfx), NULL);
+        remove_all(vdir);
+        rename_path(vstage, vdir);
+    }
+    char *vgen = PJ(vdir, "gen");
+    mkdirs(vgen);
+    write_file(PJ(vgen, "VCSVersion.inc"), "");
+    /* Official lld Common/Version.cpp, same treatment. Its Version.inc is a CMake
+     * product of Version.inc.in (LLD_VERSION == LLVM_VERSION) and is not installed;
+     * the installed llvm/Support/VCSRevision.h carries the repository URL and commit,
+     * so an empty one (what a build without VCS info generates) shadows it for this
+     * object only. Sources stay unmodified. */
+    char *lsrc = PJ(vdir, "lld", "Common", "Version.cpp");
+    char *linc = PJ(vdir, "lld", "include", "lld", "Common", "Version.inc.in");
+    if (!exists(lsrc) || !exists(linc)) {
+        fetch(crt_url, jstr(crt, "sha256"), crt_archive);
+        const char *pfx = jstr(crt, "strip_prefix");
+        must_l(o, o->root, "tar", "-xf", crt_archive, "-C", vdir, "--strip-components=1", sfmt("%s/lld/Common/Version.cpp", pfx), sfmt("%s/lld/include/lld/Common/Version.inc.in", pfx), NULL);
+    }
+    char *lgen = PJ(vdir, "lld-gen");
+    mkdirs(PJ(lgen, "lld", "Common"));
+    mkdirs(PJ(lgen, "llvm", "Support"));
+    write_file(PJ(lgen, "VCSVersion.inc"), "");
+    write_file(PJ(lgen, "llvm", "Support", "VCSRevision.h"), "");
+    {
+        const char *prefix = "#define LLVM_VERSION_STRING \"";
+        char *lver = NULL;
+        Strs lines = split_lines(header);
+        for (int i = 0; i < lines.n; i++) {
+            if (starts_with(lines.v[i], prefix)) {
+                lver = xstrdup(lines.v[i] + strlen(prefix));
+                size_t n = strlen(lver);
+                if (n > 0 && lver[n - 1] == '"') lver[n - 1] = 0;
+            }
+        }
+        if (!lver || !*lver) fail("LLVM_VERSION_STRING missing from llvm-config.h");
+        write_file(PJ(lgen, "lld", "Common", "Version.inc"), replace_all(read_file(linc, NULL), "@LLD_VERSION@", lver));
+    }
+}
+
+static void native(Opts *o) {
+    (void)wp_verified;
+    (void)split_quoted;
+    /* Checked-in C++ bridge sources (see deps/llvm-bridge/README.md). */
+    char *bridge_src = PJ(o->root, "deps", "llvm-bridge");
+    if (!is_dir(bridge_src)) fail("LLVM bridge sources missing at %s", bridge_src);
+    Json *nat = jobj(json_load(PJ(o->root, "toolchain.lock.json")), "native");
+    char *ndir = o->native_dir ? xstrdup(o->native_dir) : PJ(o->root, ".cache", "native");
+    if (!is_abs(ndir)) ndir = PJ(o->root, ndir);
+    char *header = NULL;
+    char *llvm = prepare_llvm_sdk(o, ndir, &header);
+    char *objd = PJ(ndir, "obj");
+    mkdirs(objd);
+    static const char *const lib_keys[] = {"clang_libs", "lld_libs", NULL};
+    char *libdir = PJ(llvm, "lib");
+    char *config = PJ(llvm, "bin", sfmt("llvm-config%s", EXE_SUFFIX));
     char *ar = PJ(llvm, "bin", sfmt("llvm-ar%s", EXE_SUFFIX));
     if (!exists(ar)) {
         if (IS_WIN) fail("%s missing; Windows native setup requires the SDK's llvm-ar", ar);
@@ -1108,52 +1294,10 @@ static void native(Opts *o) {
         write_file(PJ(pdir, "compile.txt"), buf_cstr(&record));
         must(o, path_dir(source), &pc);
     }
+    prepare_version_sources(o, ndir, header);
     char *vdir = PJ(ndir, "version");
-    char *vsrc = PJ(vdir, "clang", "lib", "Basic", "Version.cpp");
-    if (!exists(vsrc)) {
-        fetch(crt_url, jstr(crt, "sha256"), crt_archive);
-        char *vstage = PJ(ndir, ".version-stage");
-        remove_all(vstage);
-        mkdirs(vstage);
-        const char *pfx = jstr(crt, "strip_prefix");
-        must_l(o, o->root, "tar", "-xf", crt_archive, "-C", vstage, "--strip-components=1", sfmt("%s/clang/lib/Basic/Version.cpp", pfx), NULL);
-        remove_all(vdir);
-        rename_path(vstage, vdir);
-    }
-    char *vgen = PJ(vdir, "gen");
-    mkdirs(vgen);
-    write_file(PJ(vgen, "VCSVersion.inc"), "");
-    /* Official lld Common/Version.cpp, same treatment. Its Version.inc is a CMake
-     * product of Version.inc.in (LLD_VERSION == LLVM_VERSION) and is not installed;
-     * the installed llvm/Support/VCSRevision.h carries the repository URL and commit,
-     * so an empty one (what a build without VCS info generates) shadows it for this
-     * object only. Sources stay unmodified. */
-    char *lsrc = PJ(vdir, "lld", "Common", "Version.cpp");
-    char *linc = PJ(vdir, "lld", "include", "lld", "Common", "Version.inc.in");
-    if (!exists(lsrc) || !exists(linc)) {
-        fetch(crt_url, jstr(crt, "sha256"), crt_archive);
-        const char *pfx = jstr(crt, "strip_prefix");
-        must_l(o, o->root, "tar", "-xf", crt_archive, "-C", vdir, "--strip-components=1", sfmt("%s/lld/Common/Version.cpp", pfx), sfmt("%s/lld/include/lld/Common/Version.inc.in", pfx), NULL);
-    }
-    char *lgen = PJ(vdir, "lld-gen");
-    mkdirs(PJ(lgen, "lld", "Common"));
-    mkdirs(PJ(lgen, "llvm", "Support"));
-    write_file(PJ(lgen, "VCSVersion.inc"), "");
-    write_file(PJ(lgen, "llvm", "Support", "VCSRevision.h"), "");
-    {
-        const char *prefix = "#define LLVM_VERSION_STRING \"";
-        char *lver = NULL;
-        Strs lines = split_lines(header);
-        for (int i = 0; i < lines.n; i++) {
-            if (starts_with(lines.v[i], prefix)) {
-                lver = xstrdup(lines.v[i] + strlen(prefix));
-                size_t n = strlen(lver);
-                if (n > 0 && lver[n - 1] == '"') lver[n - 1] = 0;
-            }
-        }
-        if (!lver || !*lver) fail("LLVM_VERSION_STRING missing from llvm-config.h");
-        write_file(PJ(lgen, "lld", "Common", "Version.inc"), replace_all(read_file(linc, NULL), "@LLD_VERSION@", lver));
-    }
+    char *vsrc = PJ(vdir, "clang", "lib", "Basic", "Version.cpp"), *vgen = PJ(vdir, "gen");
+    char *lsrc = PJ(vdir, "lld", "Common", "Version.cpp"), *lgen = PJ(vdir, "lld-gen");
     Json *srcs = jarr_opt(nat, "sources");
     /* Rebuild bridge members: changing CXX or LLVM_PREFIX must not reuse stale objects. */
     Strs names_all = {0}, srcs_all = {0};
@@ -1165,7 +1309,7 @@ static void native(Opts *o) {
         strs_add(&names_all, srcs->items[i]->str);
         strs_add(&srcs_all, PJ(bridge_src, srcs->items[i]->str));
     }
-    char *ddir = prepare_dsymutil(o, ndir, llvm, cxx, external_flags, support_override, &flags);
+    char *ddir = prepare_dsymutil(o, ndir, llvm, cxx, external_flags, support_override, &flags, NULL);
     char *dsrc = PJ(ddir, "llvm", "tools", "dsymutil");
     for (int i = 0; DSYMUTIL_SOURCES[i]; i++) {
         const char *name = DSYMUTIL_SOURCES[i];
@@ -1263,6 +1407,212 @@ static void native(Opts *o) {
     if (!o->native_dir) printf("Now run: tools/build build\n");
 }
 
+/* ---- seeded preparation and the release pipeline ---- */
+static char *root_rel(const Opts *o, const char *p) {
+    size_t n = strlen(o->root);
+    if (!strncmp(p, o->root, n) && (p[n] == '/' || p[n] == '\\')) return xstrdup(p + n + 1);
+    return xstrdup(p);
+}
+
+static void json_field(Buf *b, const char *key, const char *val, int last) {
+    buf_addf(b, "  \"%s\": \"", key);
+    for (const char *p = val; *p; p++) {
+        if (*p == '"' || *p == '\\') buf_char(b, '\\');
+        buf_char(b, *p);
+    }
+    buf_addf(b, "\"%s\n", last ? "" : ",");
+}
+
+static void write_lines(const char *path, const Strs *a) {
+    Buf b = {0};
+    for (int i = 0; i < a->n; i++) {
+        if (strchr(a->v[i], '\n')) fail("recipe argument contains a newline: %s", a->v[i]);
+        buf_addf(&b, "%s\n", a->v[i]);
+    }
+    write_file(path, buf_cstr(&b));
+}
+
+/* Pinned GNU-ABI support SDK: zlib/zstd/libxml2 built by the seed plus the
+ * libstdc++-12/libgcc archives and headers (tools/linux-release-deps.c). */
+static char *prepare_linux_deps(const Opts *o) {
+    char *prefix;
+    if (o->deps_prefix) {
+        prefix = abs_path(o->deps_prefix);
+    } else {
+        prefix = PJ(o->root, ".cache", "linux-release-deps");
+        char *helper = PJ(o->self_dir, sfmt("linux-release-deps%s", EXE_SUFFIX));
+        if (!is_file(helper)) fail("%s missing: the launcher compiles it beside this tool (or pass --deps-prefix=DIR)", helper);
+        Strs cmd = {0};
+        strs_add(&cmd, helper);
+        strs_addf(&cmd, "--compiler=%s", o->compiler);
+        strs_addf(&cmd, "--prefix=%s", prefix);
+        strs_addf(&cmd, "--jobs=%d", o->jobs);
+        seed_must(o, o->root, &cmd);
+    }
+    check_host_sdk(prefix);
+    printf("host support SDK ready: %s\n", prefix);
+    return prefix;
+}
+
+/* {llvm}/lib/lib*.a for clang, lld and every LLVM component. */
+static void host_llvm_libs(const Opts *o, Strs *a, const char *llvm) {
+    Json *nat = jobj(json_load(PJ(o->root, "toolchain.lock.json")), "native");
+    char *libdir = PJ(llvm, "lib");
+    static const char *const keys[] = {"clang_libs", "lld_libs", NULL};
+    for (int k = 0; keys[k]; k++) {
+        Json *arr = jarr_opt(nat, keys[k]);
+        for (int i = 0; arr && i < arr->n; i++) {
+            static_lib(libdir, arr->items[i]->str);
+            strs_addf(a, "{llvm}/lib/lib%s.a", arr->items[i]->str);
+        }
+    }
+    char *config = PJ(llvm, "bin", sfmt("llvm-config%s", EXE_SUFFIX));
+    if (!is_file(config)) fail("%s missing; the host recipe needs the SDK's llvm-config --libnames", config);
+    Strs names = split_fields(capture_l(o, config, "--link-static", "--libnames", NULL));
+    for (int i = 0; i < names.n; i++) {
+        if (!is_file(PJ(libdir, names.v[i]))) fail("LLVM SDK lacks %s", PJ(libdir, names.v[i]));
+        strs_addf(a, "{llvm}/lib/%s", names.v[i]);
+    }
+}
+
+static char *selfhost_config(const Opts *o) { return PJ(o->root, ".cache", "native", "selfhost.json"); }
+
+static void write_selfhost(const Opts *o, const char *ndir, const char *llvm, const char *sdk) {
+    char *rdir = PJ(ndir, "selfhost");
+    mkdirs(rdir);
+    Strs bridge = host_bridge_args("{sdk}", "{root}");
+    char *bridge_file = PJ(rdir, "bridge.args");
+    write_lines(bridge_file, &bridge);
+    Strs link = {0};
+    static const char *const head[] = {"{object}", "{version}", "{lld_version}", "-Wl,--start-group", "{bridge}", NULL};
+    strs_addv(&link, head);
+    host_llvm_libs(o, &link, llvm);
+    strs_add(&link, "-Wl,--end-group");
+    host_runtime_args(&link, "{sdk}");
+    char *link_file = PJ(rdir, "link.args");
+    write_lines(link_file, &link);
+    Buf j = {0};
+    buf_str(&j, "{\n");
+    json_field(&j, "target", "linux-amd64", 0);
+    json_field(&j, "llvm-prefix", root_rel(o, llvm), 0);
+    json_field(&j, "sdk", root_rel(o, sdk), 0);
+    json_field(&j, "bridge-args", root_rel(o, bridge_file), 0);
+    json_field(&j, "link-args", root_rel(o, link_file), 0);
+    json_field(&j, "link-mode", "cc", 0);
+    json_field(&j, "cpu", HOST_CPU, 0);
+    json_field(&j, "linux-glibc", HOST_GLIBC, 0);
+    json_field(&j, "native-dir", root_rel(o, ndir), 1);
+    buf_str(&j, "}\n");
+    write_file(selfhost_config(o), buf_cstr(&j));
+}
+
+/* Everything the release pipeline's seeded host stages need, compiled by
+ * nothing but the seed: sources, LLVM SDK, GNU-ABI support SDK, native-dir
+ * inputs (version sources, dsymutil generated sources) and the host recipe. */
+static void prepare(Opts *o) {
+    require_seed(o);
+    if (strcmp(host_key(), "linux-amd64")) fail("prepare: seeded self-hosting supports a linux-amd64 host only (this is %s)", host_key());
+    setup(o);
+    char *ndir = PJ(o->root, ".cache", "native");
+    mkdirs(ndir);
+    char *header = NULL;
+    char *llvm = prepare_llvm_sdk(o, ndir, &header);
+    char *sdk = prepare_linux_deps(o);
+    /* Identity of every input of the generated native-dir sources. */
+    Buf id = {0};
+    buf_addf(&id, "seed %s\nseed-root %s\nllvm %s\nsdk %s\n", sha256_file(o->compiler), o->seed_root, llvm, sdk);
+    static const char *const ins[] = {"toolchain.lock.json", "compiler-rt.lock.json", "upstream.lock.json", "tools/build.c", NULL};
+    for (int i = 0; ins[i]; i++) buf_addf(&id, "%s %s\n", sha256_file(PJ(o->root, ins[i])), ins[i]);
+    buf_addf(&id, "llvm-config.h %s\n", sha256_file(PJ(llvm, "include", "llvm", "Config", "llvm-config.h")));
+    char *stamp = PJ(ndir, "selfhost", "prepared.txt");
+    char *want = (char *)buf_cstr(&id);
+    int fresh = exists(stamp) && !strcmp(read_file(stamp, NULL), want) && is_file(PJ(ndir, "dsymutil", "inputs.txt")) && is_file(PJ(ndir, "version", "lld-gen", "lld", "Common", "Version.inc"));
+    if (!fresh) {
+        remove_file(stamp);
+        prepare_version_sources(o, ndir, header);
+        prepare_dsymutil(o, ndir, llvm, NULL, "", "", NULL, sdk);
+    }
+    write_selfhost(o, ndir, llvm, sdk);
+    mkdirs(PJ(ndir, "selfhost"));
+    write_file(stamp, want);
+    printf("host prepared%s: %s\n", fresh ? " (verified existing)" : "", selfhost_config(o));
+}
+
+static Strs release_cmd(const Opts *o) {
+    Strs cmd = {0};
+    char *tool = PJ(o->self_dir, sfmt("release%s", EXE_SUFFIX));
+    if (!is_file(tool)) fail("%s missing: the launcher compiles it beside this tool", tool);
+    strs_add(&cmd, tool);
+    strs_addf(&cmd, "--compiler=%s", o->compiler);
+    strs_addf(&cmd, "--host-config=%s", selfhost_config(o));
+    return cmd;
+}
+
+static void release_env_must(const Opts *o, Strs *cmd) {
+    Strs extra = {0};
+    strs_addf(&extra, "TMPDIR=%s", PJ(o->root, ".cache", "tmp"));
+    strs_addf(&extra, "CROSS_CC_SEED_ROOT=%s", o->seed_root);
+    static const char *const drop[] = {"TMPDIR", "CROSS_CC_SEED_ROOT", NULL};
+    Strs env = make_env(drop, &extra);
+    int code = run_cmd(cmd->v, o->root, env.v);
+    if (code != 0) fail("%s failed (exit %d)", cmd->v[0], code);
+}
+
+/* Default build: prepare, then the same staged release pipeline as `release`,
+ * publishing only the host compiler, then the argv0 alias copies. */
+static void build(Opts *o) {
+    prepare(o);
+    mkdirs(PJ(o->root, "bin"));
+    char *out = PJ(o->root, "bin", sfmt("cross_cc%s", EXE_SUFFIX));
+    Strs cmd = release_cmd(o);
+    strs_addf(&cmd, "--profile=%s", o->profile ? o->profile : "release");
+    strs_addf(&cmd, "--build-only=%s", out);
+    release_env_must(o, &cmd);
+    if (!is_file(out)) fail("release pipeline did not publish %s", out);
+    for (int i = 0; ALIASES[i]; i++) {
+        char *dst = PJ(o->root, "bin", sfmt("%s%s", ALIASES[i], EXE_SUFFIX));
+        remove_file(dst);
+        copy_file(dst, out);
+    }
+    printf("built bin/cross_cc plus alias copies (argv0 selects mode)\n");
+}
+
+static void release_all(Opts *o) {
+    prepare(o);
+    Strs cmd = release_cmd(o);
+    strs_cat(&cmd, &o->forward);
+    release_env_must(o, &cmd);
+}
+
+/* Recompile the sibling helper tools with the seed (the launcher does this too). */
+static void tools_cmd(Opts *o, int check) {
+    require_seed(o);
+    static const char *const names[] = {"build", "release", "linux-release-deps", "macos-x64-llvm", NULL};
+    char *out = check ? PJ(o->root, "build", "check-tools") : o->self_dir;
+    mkdirs(out);
+    for (int i = 0; names[i]; i++) {
+        char *src = PJ(o->root, "tools", sfmt("%s.c", names[i]));
+        if (!is_file(src)) continue;
+        if (!check && !strcmp(names[i], "build")) continue; /* never replace the running tool */
+        char *dst = PJ(out, sfmt("%s%s", names[i], EXE_SUFFIX));
+        Strs cmd = {0};
+        strs_add(&cmd, o->compiler);
+        strs_add(&cmd, "cc");
+        strs_add(&cmd, "-std=c11");
+        strs_add(&cmd, "-O1");
+        if (check) strs_add(&cmd, "-Wall");
+        strs_add(&cmd, "-o");
+        strs_add(&cmd, dst);
+        strs_add(&cmd, src);
+        seed_must(o, o->root, &cmd);
+        printf("%s: %s\n", check ? "checked" : "built", dst);
+    }
+    if (check) {
+        char *wp = PJ(o->root, "tools", "windows_path", "windows_path_test.c");
+        if (exists(wp)) run_c_test(o, wp, "windows_path_test");
+    }
+}
+
 static int parse_jobs(const char *s) {
     char *end;
     long n = strtol(s, &end, 10);
@@ -1279,17 +1629,26 @@ int main(int argc, char **argv) {
     /* The checkout root is the working directory when it holds the lock files;
      * otherwise the parent of the directory containing this executable. */
     o.root = find_root(argv[0]);
-    if (argc < 2) {
-        fputs(USAGE, stdout);
-        return 2;
-    }
-    if (!strcmp(argv[1], "help") || !strcmp(argv[1], "--help") || !strcmp(argv[1], "-h")) {
+    o.self_dir = path_dir(real_or_abs(argv[0]));
+    const char *cmd = argc > 1 && argv[1][0] != '-' ? argv[1] : "build";
+    int first = argc > 1 && argv[1][0] != '-' ? 2 : 1;
+    if (!strcmp(cmd, "help") || (argc > 1 && (!strcmp(argv[1], "--help") || !strcmp(argv[1], "-h")))) {
         fputs(USAGE, stdout);
         return 0;
     }
-    for (int i = 2; i < argc; i++) {
+    int is_release = !strcmp(cmd, "release");
+    for (int i = first; i < argc; i++) {
         const char *a = argv[i];
-        if (!strcmp(a, "--reference")) o.reference = 1;
+        if (starts_with(a, "--compiler=")) o.compiler = xstrdup(a + 11);
+        else if (starts_with(a, "--deps-prefix=")) o.deps_prefix = xstrdup(a + 14);
+        else if (starts_with(a, "--jobs=")) {
+            o.jobs = parse_jobs(a + 7);
+            if (is_release) strs_add(&o.forward, a);
+        } else if (is_release) strs_add(&o.forward, a);
+        else if (starts_with(a, "--profile=")) {
+            o.profile = xstrdup(a + 10);
+            if (strcmp(o.profile, "debug") && strcmp(o.profile, "release")) fail("--profile must be debug or release");
+        } else if (!strcmp(a, "--reference")) o.reference = 1;
         else if (!strcmp(a, "--llvm=pinned")) o.pinned = 1;
         else if (!strcmp(a, "--llvm=system")) o.pinned = 0;
         else if (starts_with(a, "-O") && a[2]) o.opt = xstrdup(a + 2);
@@ -1301,19 +1660,21 @@ int main(int argc, char **argv) {
         else if (!strcmp(a, "--single-executable")) o.single_executable = 1;
         else if (starts_with(a, "--extra-licenses=")) o.extra_licenses = xstrdup(a + 17);
         else if (starts_with(a, "--msvc-helper=")) o.msvc_helper = xstrdup(a + 14);
-        else if (starts_with(a, "--jobs=")) o.jobs = parse_jobs(a + 7);
         else fail("unknown option %s", a);
     }
-    const char *cmd = argv[1];
     if (!strcmp(cmd, "setup")) setup(&o);
     else if (!strcmp(cmd, "resources")) resources(&o);
+    else if (!strcmp(cmd, "prepare")) prepare(&o);
     else if (!strcmp(cmd, "build")) build(&o);
+    else if (!strcmp(cmd, "release")) release_all(&o);
     else if (!strcmp(cmd, "native")) native(&o);
     else if (!strcmp(cmd, "test")) test(&o);
     else if (!strcmp(cmd, "package")) package_dist(&o);
+    else if (!strcmp(cmd, "tools")) tools_cmd(&o, 0);
+    else if (!strcmp(cmd, "check-tools")) tools_cmd(&o, 1);
     else {
         fprintf(stderr, "unknown command %s\n", cmd);
-        fputs(USAGE, stdout);
+        fputs(USAGE, stderr);
         return 2;
     }
     return 0;
