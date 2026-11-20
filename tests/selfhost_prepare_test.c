@@ -69,6 +69,26 @@ int main(int argc, char **argv) {
             char *main_cmd[] = {(char *)compiler, "cc", "-target", "x86_64-windows-msvc", "-std=c11", "-O0", "-DCROSS_CC_RELEASE_OBJECT=1", "-DCROSS_CC_WINDOWS_CANONICAL_PATHS=1", "-c", PJ(o.root, "main.c"), "-o", PJ(probe, "main.o"), NULL};
             if (run_cmd(main_cmd, o.root, env.v)) fail("supplied-SDK Windows main.c compile failed");
             CHECK(file_size(PJ(probe, "main.o")) > 0);
+            /* Use the generated tail with an immutable seed too: the CRT's
+             * combined chkstk/_alloca_probe member must precede auto builtins,
+             * while O0's automatically supplied UBSan must remain available. */
+            write_file(source, "extern void _alloca_probe(void);\nvoid (*volatile probe_ref)(void) = _alloca_probe;\n__declspec(noinline) void touch(volatile char *p) { p[0] = 9; p[16383] = 3; }\nint main(int argc, char **argv) { volatile char stack[16384]; touch(stack); volatile int divisor = argc; return stack[0] / divisor + stack[16383] - 12 + (probe_ref == 0); }\n");
+            for (int mode = 0; mode < 2; mode++) {
+                char *obj = PJ(probe, "stack.o");
+                char *compile[] = {(char *)compiler, "cc", "-target", "x86_64-windows-msvc", mode ? "-O0" : "-O2", "-fms-runtime-lib=static", "-c", source, "-o", obj, NULL};
+                if (run_cmd(compile, o.root, env.v)) fail("stackprobe fixture compile failed");
+                Strs link = {0}, tail = {0};
+                strs_add(&link, compiler); strs_add(&link, "cc");
+                strs_add(&link, "-target"); strs_add(&link, "x86_64-windows-msvc");
+                strs_add(&link, mode ? "-O0" : "-O2");
+                strs_add(&link, obj);
+                sp_link_tail(selfhost_host("windows-amd64"), &tail, "", NULL, NULL);
+                for (int k = 0; k < tail.n; k++)
+                    strs_add(&link, sp_expand(tail.v[k], o.seed_root, abs_path(argv[2]), "", ""));
+                strs_add(&link, "-s"); strs_add(&link, "-o"); strs_add(&link, exe);
+                if (run_cmd(link.v, o.root, env.v)) fail("generated Windows CRT recipe failed (%s)", mode ? "debug" : "release");
+            }
+            puts("generated MSVC recipe: release and O0 debug stackprobe links passed");
             remove_all(probe);
             return failures ? 1 : 0;
         } else if (!strcmp(argv[1], "--prepare")) {
@@ -201,6 +221,14 @@ int main(int argc, char **argv) {
     Strs wt = {0};
     sp_link_tail(selfhost_host("windows-amd64"), &wt, "psapi.lib shell32.lib -lole32 xml2s.lib", NULL, "/x/libxml2s.lib");
     CHECK(has(&wt, "/x/libxml2s.lib") && !has(&wt, "-lxml2s"));
+    CHECK(wt.n > 5 && !strcmp(wt.v[0], "-nodefaultlibs"));
+    CHECK(!strcmp(wt.v[1], "{sdk}/crt/lib/x86_64/libcmt.lib"));
+    CHECK(!strcmp(wt.v[2], "{sdk}/crt/lib/x86_64/libvcruntime.lib"));
+    CHECK(!strcmp(wt.v[3], "{sdk}/crt/lib/x86_64/libcpmt.lib"));
+    CHECK(!strcmp(wt.v[4], "{sdk}/sdk/lib/ucrt/x86_64/libucrt.lib"));
+    CHECK(!has(&wt, "-nostdlib")); /* Preserve automatic debug UBSan. */
+    CHECK(has(&wt, "-lkernel32")); /* Required even without LLVM system-libs. */
+    CHECK(!has(&dt, "-nodefaultlibs") && !has(&ll, "-nodefaultlibs"));
     CHECK(has(&wt, "-lpsapi") && has(&wt, "-lshell32") && has(&wt, "-lole32") && has(&wt, "-L{sdk}/crt/lib/x86_64"));
     CHECK(child(self, "--darwin-nozstd", "x") != 0);
     CHECK(child(self, "--abs-syslib", "x") != 0);
@@ -230,6 +258,8 @@ int main(int argc, char **argv) {
     CHECK(!strcmp(jstr(wj, "target"), "windows-amd64") && !strcmp(jstr(wj, "path-args"), "wnative/selfhost/bridge.args") && !*jstr_opt(wj, "linux-glibc"));
     Strs wl = split_lines(read_file(PJ(root, "wnative", "selfhost", "link.args"), NULL));
     CHECK(has(&wl, "{windows_path}") && has(&wl, "-lpsapi") && has(&wl, "{llvm}/lib/libLLVMSupport.a"));
+    CHECK(has(&wl, "-nodefaultlibs") && has(&wl, "-lkernel32") && !has(&wl, "-nostdlib"));
+    for (int i = 1; i <= 4; i++) CHECK(has(&wl, wt.v[i]));
     CHECK(has(&wl, "{llvm}/lib/clangBasic.lib") && has(&wl, "{llvm}/lib/lldCommon.lib"));
     CHECK(!has(&wl, "{llvm}/lib/libclangBasic.a") && !has(&wl, "-Wl,--start-group"));
     Strs we = {0};
