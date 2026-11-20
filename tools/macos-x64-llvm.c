@@ -93,9 +93,8 @@ int main(int argc, char **argv) {
         char *zsrc = PJ(work, zname);
         remove_all(zsrc);
         run_l(root, "tar", "-xf", zarchive, "-C", work, NULL);
-        static const char *const drop[] = {"CC", "CXX", "AR", "CFLAGS", "CPPFLAGS", "LDFLAGS", "SDKROOT", "MAKEFLAGS", NULL};
-        Strs none = {0};
-        Strs env = make_env(drop, &none);
+        static const char *const more[] = {"MACOSX_DEPLOYMENT_TARGET", NULL};
+        Strs env = sd_seed_env(compiler, PJ(work, "cross_cc-cache"), PJ(work, "tmp"), more);
         SdCtx sd = {0};
         sd.compiler = compiler;
         sd.env = env.v;

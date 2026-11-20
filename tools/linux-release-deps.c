@@ -96,10 +96,7 @@ int main(int argc, char **argv) {
     static const char *const dirs[] = {"downloads", "src", "lib", "licenses", "tmp", "sysroot", NULL};
     for (int i = 0; dirs[i]; i++) mkdirs(PJ(o.prefix, dirs[i]));
     o.cc = find_compiler_checked(compiler_arg);
-    static const char *const drop[] = {"TMPDIR", "CC", "CXX", "AR", "SDKROOT", "CFLAGS", "CPPFLAGS", "LDFLAGS", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "MAKEFLAGS", NULL};
-    Strs extra = {0};
-    strs_addf(&extra, "TMPDIR=%s", PJ(o.prefix, "tmp"));
-    o.env = make_env(drop, &extra);
+    o.env = sd_seed_env(o.cc, PJ(o.prefix, "tmp", "cross_cc-cache"), PJ(o.prefix, "tmp"), NULL);
     o.sd.compiler = o.cc;
     o.sd.env = o.env.v;
     o.sd.jobs = o.jobs;
@@ -109,13 +106,19 @@ int main(int argc, char **argv) {
     Json *top = json_load(lock);
     if (top->type != J_OBJ) fail("lock is not an object");
     Json *pins = jobj(top, "linux_release_deps");
-    static const char *const notices[] = {"GPL-3.0.txt", "GCC-Runtime-Library-Exception-3.1.txt", NULL};
-    for (int i = 0; notices[i]; i++) copy_to(PJ(o.prefix, "licenses", notices[i]), PJ(o.root, "licenses", notices[i]));
-    /* A completed invocation is reusable only with the exact same lock file. */
+    /* The receipt binds the lock, this helper and its recipe header, the compiler binary,
+     * the target flags and every output file hash. Reuse recomputes all of it. */
+    static const char *const manifest_dirs[] = {"lib", "include", "licenses", "sysroot/usr/include/c++", "sysroot/usr/include/x86_64-linux-gnu/c++", "sysroot/usr/lib/gcc", NULL};
+    Buf hb = {0};
+    buf_addf(&hb, "recipe linux-release-deps-v2\nlock %s\ncompiler %s\n", sha256_file(lock), sha256_file(o.cc));
+    buf_addf(&hb, "source-file %s tools/linux-release-deps.c\nsource-file %s tools/support_deps.h\ntarget", sha256_file(PJ(o.root, "tools", "linux-release-deps.c")), sha256_file(PJ(o.root, "tools", "support_deps.h")));
+    for (int i = 0; i < o.sd.target.n; i++) buf_addf(&hb, " %s", o.sd.target.v[i]);
+    buf_addf(&hb, "\nmanifest\n");
+    const char *header = buf_cstr(&hb);
     char *receipt = PJ(o.prefix, "complete.sha256");
     if (exists(receipt)) {
-        char *contents = trim(read_file(receipt, NULL));
-        if (strcmp(contents, sha256_file(lock)) != 0) fail("dependency prefix belongs to another lock; choose a fresh --prefix");
+        char *want = sfmt("%s%s", header, sd_manifest(o.prefix, manifest_dirs));
+        if (strcmp(read_file(receipt, NULL), want) != 0) fail("dependency prefix %s differs from its receipt (other lock, helper, compiler, flags, or a modified/missing output file); choose a fresh --prefix", o.prefix);
         static const char *const libs[] = {"z", "zstd", "xml2", "stdc++", "gcc", "gcc_eh", NULL};
         for (int i = 0; libs[i]; i++) {
             if (!exists(PJ(o.prefix, "lib", sfmt("lib%s.a", libs[i])))) fail("incomplete prefix: missing %s", libs[i]);
@@ -123,6 +126,8 @@ int main(int argc, char **argv) {
         printf("verified existing dependency prefix %s\n", o.prefix);
         return 0;
     }
+    static const char *const notices[] = {"GPL-3.0.txt", "GCC-Runtime-Library-Exception-3.1.txt", NULL};
+    for (int i = 0; notices[i]; i++) copy_to(PJ(o.prefix, "licenses", notices[i]), PJ(o.root, "licenses", notices[i]));
     char *incdir = PJ(o.prefix, "include"), *libdir = PJ(o.prefix, "lib");
     char *bld = PJ(o.prefix, "build");
     char *z = source(&o, pins, "zlib", ".tar.gz");
@@ -155,7 +160,7 @@ int main(int argc, char **argv) {
         {"gcc-11-copyright", PJ(o.prefix, "sysroot", "usr", "share", "doc", "gcc-11-base", "copyright")},
     };
     for (size_t i = 0; i < sizeof copies / sizeof copies[0]; i++) copy_to(PJ(o.prefix, "licenses", copies[i][0]), copies[i][1]);
-    write_file(receipt, sfmt("%s\n", sha256_file(lock)));
+    write_file(receipt, sfmt("%s%s", header, sd_manifest(o.prefix, manifest_dirs)));
     printf("built static release support archives: %s\n", PJ(o.prefix, "lib"));
     puts("Final executable still requires a readelf dependency/version audit; host glibc is not pinned by this helper.");
     return 0;

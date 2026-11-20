@@ -176,4 +176,64 @@ static void sd_build_libxml2(const SdCtx *c, const char *version, const char *sr
     copy_file(PJ(incdir, "libxml2", "libxml", "xmlversion.h"), PJ(gen, "libxml", "xmlversion.h"));
 }
 
+/* ---- Seed isolation -------------------------------------------------------
+ * The seed must use its own resources, never a checkout's. CROSS_CC_SEED_ROOT
+ * (if set) or the directory discovered from the compiler path (the compiler's
+ * dir, its parent, or ../share/cross_cc holding upstream.lock.json) becomes
+ * CROSS_CC_ROOT; every other resource/cache override is dropped. */
+static char *sd_seed_root(const char *compiler) {
+    const char *forced = getenv("CROSS_CC_SEED_ROOT");
+    if (forced && *forced) {
+        if (!is_abs(forced) || !is_dir(forced)) fail("CROSS_CC_SEED_ROOT must be an absolute directory: %s", forced);
+        return xstrdup(forced);
+    }
+    char *real = realpath(compiler, NULL);
+    char *dir = real ? xstrdup(real) : xstrdup(compiler);
+    free(real);
+    char *slash = strrchr(dir, '/');
+    if (slash) *slash = 0;
+    char *cands[] = {dir, PJ(dir, ".."), PJ(dir, "..", "share", "cross_cc"), NULL};
+    for (int i = 0; cands[i]; i++)
+        if (is_file(PJ(cands[i], "upstream.lock.json"))) return cands[i];
+    fail("cannot find the seed's resource root next to %s; set CROSS_CC_SEED_ROOT", compiler);
+    return NULL;
+}
+
+static Strs sd_seed_env(const char *compiler, const char *cachedir, const char *tmpdir, const char *const *more_drop) {
+    static const char *const drop[] = {"CROSS_CC_ROOT", "CROSS_CC_LIB_DIR", "CROSS_CC_CACHE_DIR", "CROSS_CC_MSVC", "CROSS_CC_SEED_ROOT", "ZIG_LIB_DIR", "ZIG_GLOBAL_CACHE_DIR", "ZIG_LOCAL_CACHE_DIR", "ZIG_LIBC", "CC", "CXX", "AR", "CFLAGS", "CPPFLAGS", "LDFLAGS", "LIBRARY_PATH", "CPATH", "C_INCLUDE_PATH", "CPLUS_INCLUDE_PATH", "OBJC_INCLUDE_PATH", "CCC_OVERRIDE_OPTIONS", "SDKROOT", "MAKEFLAGS", "TMPDIR", NULL};
+    const char *all[64];
+    int n = 0;
+    for (int i = 0; drop[i]; i++) all[n++] = drop[i];
+    for (int i = 0; more_drop && more_drop[i] && n < 62; i++) all[n++] = more_drop[i];
+    all[n] = NULL;
+    Strs extra = {0};
+    strs_addf(&extra, "CROSS_CC_ROOT=%s", sd_seed_root(compiler));
+    strs_addf(&extra, "CROSS_CC_CACHE_DIR=%s", cachedir);
+    strs_addf(&extra, "TMPDIR=%s", tmpdir);
+    mkdirs(cachedir);
+    mkdirs(tmpdir);
+    return make_env(all, &extra);
+}
+
+/* ---- Receipt manifest -----------------------------------------------------
+ * Text of "<sha256>  <relative path>" for every regular file below each listed
+ * directory of prefix, sorted. Symlinks are listed by name only. */
+static void sd_manifest_dir(Buf *b, const char *prefix, const char *rel) {
+    char *dir = PJ(prefix, rel);
+    Strs names = {0};
+    if (!list_dir(dir, &names)) return;
+    for (int i = 0; i < names.n; i++) {
+        char *r = PJ(rel, names.v[i]), *full = PJ(prefix, r);
+        if (is_symlink(full)) buf_addf(b, "symlink  %s\n", r);
+        else if (is_dir(full)) sd_manifest_dir(b, prefix, r);
+        else if (is_file(full)) buf_addf(b, "%s  %s\n", sha256_file(full), r);
+    }
+}
+
+static char *sd_manifest(const char *prefix, const char *const *rels) {
+    Buf b = {0};
+    for (int i = 0; rels[i]; i++) sd_manifest_dir(&b, prefix, rels[i]);
+    return xstrdup(buf_cstr(&b));
+}
+
 #endif
