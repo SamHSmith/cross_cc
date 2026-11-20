@@ -140,6 +140,22 @@ StrVec builtins_sources(const char *arch, const char *target_os,
   *ok = true;
   return result;
 }
+/* The Microsoft CRT owns the stack probe on CRT-backed links. In particular,
+   libcmt's chkstk.obj also exports _alloca_probe, so resolving __chkstk from an
+   earlier compiler-rt archive can still pull that member and define it twice.
+   Keep compiler-rt's implementation for explicit -nolibc links only. MinGW has
+   its own CRT/probe recipe and must not use this MSVC ownership rule. */
+static StrVec builtins_link_sources(Options o, Target t, bool *ok) {
+  StrVec list = builtins_sources(t.arch, t.os, t.abi, ok);
+  if (!builtins_msvc_supported(t) || o.no_libc)
+    return list;
+  StrVec result = {0};
+  for (size_t i = 0; i < list.len; i++)
+    if (!in_target_inventory("x86_64/chkstk.S i386/chkstk2.S aarch64/chkstk.S",
+                             list.data[i]))
+      sv_push(&result, list.data[i]);
+  return result;
+}
 #ifdef _WIN32
 typedef struct {
   HANDLE process;
@@ -374,7 +390,8 @@ char *prepare_builtins(Options o, Target t, Toolchain tc, char **error) {
     return rt_error(error, e);
   bool ppc_kf = builtins_ppc_ieee_tf(t);
   const char *recipe_base =
-      builtins_msvc_supported(t) ? "portable-builtins-v3-msvc"
+      builtins_msvc_supported(t) ? (o.no_libc ? "portable-builtins-v4-msvc-nocrt"
+                                             : "portable-builtins-v4-msvc-crt")
       : streq(t.os, "openbsd")   ? "portable-builtins-v5-openbsd-emutls"
       : streq(t.arch, "riscv32") ? "portable-builtins-v4-riscv32-int128"
       : ppc_kf                   ? "portable-builtins-v4-ppc64le-kf1"
@@ -439,7 +456,7 @@ char *prepare_builtins(Options o, Target t, Toolchain tc, char **error) {
   Builtins_JobVec jobs = {0};
   StrVec objects = {0};
   bool ok = false;
-  StrVec list = builtins_sources(t.arch, t.os, t.abi, &ok);
+  StrVec list = builtins_link_sources(o, t, &ok);
   if (!ok) {
     e = "unsupported architecture";
     goto fail;
