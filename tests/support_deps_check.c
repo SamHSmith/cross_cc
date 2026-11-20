@@ -98,7 +98,13 @@ static int prime_mock(const char *work) {
     write_file(PJ(mdir, "upstream.lock.json"), "{}\n");
     write_file(cc, MOCK_SH);
     chmod(cc, 0755);
+    /* The launcher may export its real seed root. Discover the fixture's root
+       without letting that override escape into the mock's child environment. */
+    const char *seed_root = getenv("CROSS_CC_SEED_ROOT");
+    char *saved_seed_root = seed_root ? xstrdup(seed_root) : NULL;
+    PCHECK(unsetenv("CROSS_CC_SEED_ROOT") == 0);
     Strs env = sd_seed_env(cc, cache, tmp, NULL);
+    if (saved_seed_root) PCHECK(setenv("CROSS_CC_SEED_ROOT", saved_seed_root, 1) == 0);
     SdCtx c = {0};
     c.compiler = cc;
     strs_add(&c.target, "-target");
