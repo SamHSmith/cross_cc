@@ -10,6 +10,16 @@
  *
  * POSIX hosts only; run from the repository root. Without a host clang the
  * test reports SKIP and succeeds. */
+#ifdef _WIN32
+/* Unsupported on Windows (see "POSIX hosts only" above): the harness needs
+ * fork/exec, signals and wait status. The test runner compiles every *_test.c,
+ * so Windows builds an explicit SKIP stub; this is not a Windows UBSan pass. */
+#include <stdio.h>
+int main(void) {
+    puts("ubsan_runtime_test: SKIP (POSIX-only harness; not run on Windows)");
+    return 0;
+}
+#else
 #define _POSIX_C_SOURCE 200809L
 #include <signal.h>
 #include <stdio.h>
@@ -241,3 +251,4 @@ int main(int argc, char **argv) {
     printf("\n%d failed\n", failed);
     return failed != 0;
 }
+#endif /* _WIN32 */

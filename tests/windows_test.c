@@ -9,7 +9,9 @@
 /* Unit tests for the Windows runtime and SDK handling (src/msvc*.c, src/mingw*.c).
    They run on any host against real files and the real readers; no SDK is
    downloaded. Native Windows behavior (registry discovery, reparse points,
-   GetFinalPathName) is only compiled on Windows and is NOT exercised here. */
+   GetFinalPathName) is only compiled on Windows; on Windows hosts the inventory
+   test creates real symlink/reparse fixtures, and reports SKIP if the
+   privilege to create them is unavailable. Registry discovery is not exercised. */
 /* Unity build: the Windows modules plus the support code they link against. */
 #include "support.c"
 #include "libc_config.c"
@@ -331,6 +333,39 @@ static void test_reparse_bounds(void) {
     for (int i = 0; i < 4; i++) CHECK(!msvc_path_within("\\\\?\\C:\\cache\\sdk", bad[i], true));
 }
 
+/* Native link fixtures. POSIX uses symlink(2); Windows uses CreateSymbolicLinkW
+   (the reparse points msvc_read_link/msvc_final_path inspect in production), with
+   backslash targets because the kernel does not normalize '/' in link targets.
+   Returns 1 on success, 0 on failure, -1 when Windows denies link creation. */
+static int make_link(const char *target, const char *link, bool dir) {
+#ifdef _WIN32
+    char *t = str_replace(target, "/", "\\");
+    wchar_t *wt = w_from(t), *wl = w_from(link);
+    if (!wt || !wl) return 0;
+    DWORD flags = dir ? 0x1 : 0;
+    if (CreateSymbolicLinkW(wl, wt, flags | 0x2 /* ALLOW_UNPRIVILEGED_CREATE */)) return 1;
+    DWORD e = GetLastError();
+    if (e == ERROR_INVALID_PARAMETER && CreateSymbolicLinkW(wl, wt, flags)) return 1;
+    if (e == ERROR_INVALID_PARAMETER) e = GetLastError();
+    if (e == ERROR_PRIVILEGE_NOT_HELD) return -1;
+    fprintf(stderr, "CreateSymbolicLinkW error %lu\n", (unsigned long)e);
+    return 0;
+#else
+    (void)dir;
+    return symlink(target, link) == 0;
+#endif
+}
+
+static bool remove_link(const char *link, bool dir) {
+#ifdef _WIN32
+    wchar_t *w = w_from(link);
+    return w && (dir ? RemoveDirectoryW(w) : DeleteFileW(w));
+#else
+    (void)dir;
+    return unlink(link) == 0;
+#endif
+}
+
 static void test_inventory_links(void) {
     char *dir = test_dir("cross-msvc-links-");
     char *root_rel = path_join(dir, "sdk"), *sibling_rel = path_join(dir, "sdk-other");
@@ -342,7 +377,14 @@ static void test_inventory_links(void) {
     char *link = path_join(root, "alias.h");
     const char *targets[5] = {"regular.h", path_join(root, "regular.h"), "../sdk-other/outside.h", path_join(sibling, "outside.h"), "missing.h"};
     for (int i = 0; i < 5; i++) {
-        CHECK(symlink(targets[i], link) == 0);
+        int made = make_link(targets[i], link, false);
+        if (made < 0) {
+            printf("windows_test: SKIP test_inventory_links: Windows denied symbolic-link creation (privilege not held)\n");
+            remove_tree(dir);
+            return;
+        }
+        CHECK(made == 1);
+        if (made != 1) break;
         char *re = NULL;
         char *raw = msvc_read_link(link, &re);
         CHECK(re == NULL);
@@ -357,11 +399,11 @@ static void test_inventory_links(void) {
             CHECK(error != NULL);
             CHECK(error && contains(error, link));
         }
-        CHECK(unlink(link) == 0);
+        CHECK(remove_link(link, false));
     }
     char *bridge = path_join(root, "bridge");
-    CHECK(symlink(sibling, bridge) == 0);
-    CHECK(symlink("bridge/outside.h", link) == 0);
+    CHECK(make_link(sibling, bridge, true) == 1);
+    CHECK(make_link("bridge/outside.h", link, false) == 1);
     char *e1 = NULL, *e2 = NULL;
     char *resolved = msvc_final_path(link, &e1);
     char *base = msvc_final_path(root, &e2);
@@ -369,8 +411,8 @@ static void test_inventory_links(void) {
     CHECK(!msvc_path_within(base, resolved, false));
     Managed_Msvc_Files files = {0};
     CHECK(msvc_inventory(root, "", &files) != NULL);
-    CHECK(unlink(link) == 0);
-    CHECK(unlink(bridge) == 0);
+    CHECK(remove_link(link, false));
+    CHECK(remove_link(bridge, true));
     remove_tree(dir);
 }
 
