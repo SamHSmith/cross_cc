@@ -49,6 +49,28 @@ int main(int argc, char **argv) {
         } else if (!strcmp(argv[1], "--abs-syslib")) {
             Strs a = {0};
             sp_link_tail(selfhost_host("windows-amd64"), &a, "/opt/builder/libfoo.a", NULL, NULL);
+        } else if (!strcmp(argv[1], "--msvc-cross")) {
+            const char *compiler = env_get("SELFHOST_PROBE_COMPILER");
+            if (!is_file(compiler)) fail("set SELFHOST_PROBE_COMPILER to an existing cross_cc seed");
+            o.compiler = (char *)compiler;
+            require_seed(&o);
+            char *probe = PJ(o.root, "build", "tests", "msvc-sdk-probe");
+            if (exists(probe)) fail("probe directory already exists: %s", probe);
+            mkdirs(probe);
+            char *source = PJ(probe, "probe.c"), *exe = PJ(probe, "probe.exe");
+            write_file(source, "#include <windows.h>\n#include <stdio.h>\nint main(void) { printf(\"%lu\\n\", (unsigned long)GetCurrentProcessId()); return 0; }\n");
+            Strs env = seed_env(&o);
+            sp_msvc_env(&env, abs_path(argv[2]), PJ(probe, "libc.txt"));
+            char *cmd[] = {(char *)compiler, "cc", "-target", "x86_64-windows-msvc", (char *)source, "-o", exe, NULL};
+            if (run_cmd(cmd, o.root, env.v)) fail("supplied-SDK Windows probe link failed");
+            size_t n;
+            char *pe = read_file(exe, &n);
+            CHECK(n > 2 && pe[0] == 'M' && pe[1] == 'Z');
+            char *main_cmd[] = {(char *)compiler, "cc", "-target", "x86_64-windows-msvc", "-std=c11", "-O0", "-DCROSS_CC_RELEASE_OBJECT=1", "-DCROSS_CC_WINDOWS_CANONICAL_PATHS=1", "-c", PJ(o.root, "main.c"), "-o", PJ(probe, "main.o"), NULL};
+            if (run_cmd(main_cmd, o.root, env.v)) fail("supplied-SDK Windows main.c compile failed");
+            CHECK(file_size(PJ(probe, "main.o")) > 0);
+            remove_all(probe);
+            return failures ? 1 : 0;
         } else if (!strcmp(argv[1], "--prepare")) {
             o.root = argv[2];
             prepare(&o);
@@ -195,12 +217,28 @@ int main(int argc, char **argv) {
 
     /* Generated darwin and windows recipes from the fake SDK. */
     write_file(config, "#!/bin/sh\ncase \"$2\" in --libnames) echo libLLVMSupport.a libLLVMDemangle.a;; --system-libs) echo -lm -lz psapi.lib;; esac\n");
+    remove_file(PJ(llvm, "lib", "libclangBasic.a"));
+    remove_file(PJ(llvm, "lib", "liblldCommon.a"));
+    write_file(PJ(llvm, "lib", "clangBasic.lib"), "");
+    write_file(PJ(llvm, "lib", "lldCommon.lib"), "");
     SelfhostCfg wc = {selfhost_host("windows-amd64"), llvm, splat, PJ(root, "wnative"), NULL, NULL, "x86-64-v2", NULL, 0};
     write_selfhost(&o, &wc, NULL, "/x/libxml2s.lib");
     Json *wj = json_load(selfhost_config(&o));
     CHECK(!strcmp(jstr(wj, "target"), "windows-amd64") && !strcmp(jstr(wj, "path-args"), "wnative/selfhost/bridge.args") && !*jstr_opt(wj, "linux-glibc"));
     Strs wl = split_lines(read_file(PJ(root, "wnative", "selfhost", "link.args"), NULL));
     CHECK(has(&wl, "{windows_path}") && has(&wl, "-lpsapi") && has(&wl, "{llvm}/lib/libLLVMSupport.a"));
+    CHECK(has(&wl, "{llvm}/lib/clangBasic.lib") && has(&wl, "{llvm}/lib/lldCommon.lib"));
+    CHECK(!has(&wl, "{llvm}/lib/libclangBasic.a") && !has(&wl, "-Wl,--start-group"));
+    Strs we = {0};
+    strs_add(&we, "INCLUDE=/poison"); strs_add(&we, "LIB=/poison");
+    strs_add(&we, "CROSS_CC_MSVC=managed"); strs_add(&we, "ZIG_LIBC=/poison");
+    char *libc = PJ(root, "windows-libc.txt");
+    sp_msvc_env(&we, splat, libc);
+    CHECK(has(&we, "CROSS_CC_MSVC=system") && has(&we, sfmt("ZIG_LIBC=%s", libc)));
+    CHECK(!has(&we, "INCLUDE=/poison") && !has(&we, "LIB=/poison") && !has(&we, "CROSS_CC_MSVC=managed"));
+    CHECK(contains(read_file(libc, NULL), sfmt("kernel32_lib_dir=%s", PJ(splat, "sdk", "lib", "um", "x86_64"))));
+    write_file(PJ(llvm, "lib", "libclangBasic.a"), "");
+    write_file(PJ(llvm, "lib", "liblldCommon.a"), "");
     SelfhostCfg dc = {selfhost_host("darwin-arm64"), llvm, apple, PJ(root, "dnative"), NULL, NULL, "generic", NULL, 0};
     write_selfhost(&o, &dc, NULL, NULL);
     Json *dj = json_load(selfhost_config(&o));

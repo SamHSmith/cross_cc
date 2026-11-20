@@ -223,6 +223,21 @@ int main(int argc, char **argv) {
     char *self = abs_path(argv[0]);
     char *base = abs_path(sfmt("build/tests/selfhost-fixture-%lu", (unsigned long)(size_t)&failures));
     CHECK(!strcmp(default_options().linux_glibc, "2.34"));
+    Opts windows = default_options();
+    windows.target = "windows-amd64"; windows.root = base;
+    windows.sdk = PJ(base, "accepted-sdk"); windows.stage = PJ(base, "windows-stage");
+    Strs windows_env = environment(&windows);
+    int system = 0, bound = 0;
+    for (int i = 0; i < windows_env.n; i++) {
+        if (!strcmp(windows_env.v[i], "CROSS_CC_MSVC=system")) system++;
+        if (!strcmp(windows_env.v[i], sfmt("ZIG_LIBC=%s", PJ(windows.stage, "msvc-libc.txt")))) bound++;
+    }
+    CHECK(system == 1 && bound == 1);
+    CHECK(is_file(PJ(windows.stage, "msvc-libc.txt")));
+    Opts defaults = default_options(), notices = default_options();
+    defaults.extra_licenses = "host-notices"; defaults.msvc_helper = "host-xwin";
+    notices = native_defaults(notices, &defaults);
+    CHECK(!strcmp(notices.extra_licenses, "host-notices") && !strcmp(notices.msvc_helper, "host-xwin"));
     native_test(base, self, "debug", 0);
     native_test(base, self, "release", 0);
     native_test(base, self, "release", 1);

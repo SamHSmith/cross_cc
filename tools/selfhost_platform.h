@@ -12,6 +12,34 @@
  *                 (xwin splat layout; license acceptance is the user's act)
  * Anything else: --host-config=FILE with a complete recipe. */
 
+/* Select a supplied MSVC splat explicitly. INCLUDE/LIB also serve raw Clang,
+ * but cross_cc's system detector uses registry discovery on Windows and rejects
+ * discovery elsewhere: its documented ZIG_LIBC file is needed to bind this SDK.
+ * No managed cache, downloader, or license-consent flag is involved. */
+static void sp_msvc_env(Strs *env, const char *sdk, const char *libc_file) {
+    static const char *const keys[] = {"INCLUDE", "LIB", "CROSS_CC_MSVC", "ZIG_LIBC", NULL};
+    Strs clean = {0};
+    for (int i = 0; i < env->n; i++) {
+        int skip = 0;
+        for (int k = 0; keys[k]; k++) {
+            size_t n = strlen(keys[k]);
+            if (strlen(env->v[i]) <= n || env->v[i][n] != '=') continue;
+            int match = 1;
+            for (size_t j = 0; j < n; j++) if (toupper((unsigned char)env->v[i][j]) != keys[k][j]) match = 0;
+            if (match) skip = 1;
+        }
+        if (!skip) strs_add(&clean, env->v[i]);
+    }
+    mkdirs(path_dir(libc_file));
+    write_file(libc_file, sfmt("include_dir=%s\nsys_include_dir=%s\ncrt_dir=%s\nmsvc_lib_dir=%s\nkernel32_lib_dir=%s\ncc_dir=\ndarwin_sdk_dir=\n", PJ(sdk, "sdk", "include", "ucrt"), PJ(sdk, "crt", "include"), PJ(sdk, "sdk", "lib", "ucrt", "x86_64"), PJ(sdk, "crt", "lib", "x86_64"), PJ(sdk, "sdk", "lib", "um", "x86_64")));
+    strs_addf(&clean, "INCLUDE=%s;%s;%s;%s", PJ(sdk, "crt", "include"), PJ(sdk, "sdk", "include", "ucrt"), PJ(sdk, "sdk", "include", "um"), PJ(sdk, "sdk", "include", "shared"));
+    strs_addf(&clean, "LIB=%s;%s;%s", PJ(sdk, "crt", "lib", "x86_64"), PJ(sdk, "sdk", "lib", "ucrt", "x86_64"), PJ(sdk, "sdk", "lib", "um", "x86_64"));
+    strs_add(&clean, "CROSS_CC_MSVC=system");
+    strs_addf(&clean, "ZIG_LIBC=%s", libc_file);
+    *env = clean;
+}
+
+#ifndef CROSS_CC_MSVC_ENV_ONLY
 typedef struct {
     const char *host;         /* host_key() */
     const char *clang_target; /* raw cross_clang --target */
@@ -162,3 +190,4 @@ static int sp_release_only(const char *l) {
     }
     return 0;
 }
+#endif /* CROSS_CC_MSVC_ENV_ONLY */
