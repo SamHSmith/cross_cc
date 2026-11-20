@@ -125,8 +125,20 @@ static void sp_link_tail(const SelfhostHost *h, Strs *a, const char *system_libs
         strs_add(a, "-lc++");
         return;
     }
+    /* V1 appends compiler-rt before Clang's default CRT libraries. Own the /MT
+     * CRT explicitly, before those appended runtimes, so its chkstk.obj supplies
+     * both __chkstk and _alloca_probe. -nodefaultlibs reaches Clang; it does NOT
+     * suppress cross_cc's automatic runtimes (debug objects still need UBSan).
+     * -nostdlib would suppress UBSan too and break the O0 bootstrap. */
+    strs_add(a, "-nodefaultlibs");
+    strs_add(a, "{sdk}/crt/lib/x86_64/libcmt.lib");
+    strs_add(a, "{sdk}/crt/lib/x86_64/libvcruntime.lib");
+    strs_add(a, "{sdk}/crt/lib/x86_64/libcpmt.lib");
+    strs_add(a, "{sdk}/sdk/lib/ucrt/x86_64/libucrt.lib");
     for (int i = 0; MSVC_LIBDIRS[i]; i++) strs_addf(a, "-L{sdk}/%s", MSVC_LIBDIRS[i]);
     sp_system_libs(a, system_libs, zstd_archive, xml2_archive, h->host);
+    /* Clang normally supplies this OS import library with its default CRT. */
+    strs_add(a, "-lkernel32");
 }
 
 /* Head of the final link recipe (release.c requires these exact inputs). */
