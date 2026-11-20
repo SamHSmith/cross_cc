@@ -26,7 +26,12 @@
 #include "msvc_windows.c"
 #include "msvc_libcxx.c"
 #include "msvc_link.c"
+/* Only managed acquisition's child-process boundary is fake: tests exercise
+   the real pin parser, downloader verification, staging and publication. */
+static int managed_test_command(StrVec args, bool verbose);
+#define run_command managed_test_command
 #include "msvc_managed.c"
+#undef run_command
 #include "mingw.c"
 #include "mingw_recipes.c"
 
@@ -482,6 +487,132 @@ static void test_cached_integrity(void) {
     remove_tree(dir);
 }
 
+static const char manifest_bytes[] = "{\"packages\":[]}";
+static const char *manifest_download, *manifest_channel;
+static int manifest_fetches, manifest_helpers, manifest_tamper;
+
+static const char *managed_test_arg(StrVec cmd, const char *name) {
+    for (size_t i = 0; i + 1 < cmd.len; i++) if (streq(cmd.data[i], name)) return cmd.data[i + 1];
+    CHECK(false);
+    return "";
+}
+
+static int managed_test_command(StrVec cmd, bool verbose) {
+    (void)verbose;
+    if (cmd.len && streq(cmd.data[0], "curl")) {
+        manifest_fetches++;
+        CHECK_STR(cmd.data[cmd.len - 1], "https://example.invalid/VisualStudio.vsman");
+        CHECK_STR(managed_test_arg(cmd, "--proto"), "=https");
+        CHECK_STR(managed_test_arg(cmd, "--proto-redir"), "=https");
+        if (manifest_download) put(managed_test_arg(cmd, "-o"), manifest_download);
+        return 0;
+    }
+    manifest_helpers++;
+    CHECK(ends_with(cmd.data[0], "libexec/xwin" NATIVE_EXE_SUFFIX));
+    CHECK_STR(cmd.data[1], "--accept-license");
+    CHECK_STR(slurp(managed_test_arg(cmd, "--manifest")), manifest_channel);
+    char *cached = path_join(managed_test_arg(cmd, "--cache-dir"), "dl",
+        str_fmt("pkg_manifest_%s.vsman", msvc_digest(manifest_bytes, strlen(manifest_bytes))));
+    /* This assertion binds the verified download to xwin's actual input path,
+       not to a separate file that the helper never reads. */
+    CHECK_STR(slurp(cached), manifest_bytes);
+    char *output = (char *)managed_test_arg(cmd, "--output");
+    CHECK(!path_exists(path_join(output, "receipt.json")));
+    const char *files[] = {"sdk/include/ucrt/stdio.h", "crt/include/vcruntime.h", "sdk/include/um/windows.h", "sdk/include/shared/winerror.h",
+        "sdk/lib/ucrt/x86_64/ucrt.lib", "crt/lib/x86_64/libcmt.lib", "sdk/lib/um/x86_64/kernel32.lib"};
+    for (size_t i = 0; i < sizeof(files) / sizeof(files[0]); i++) {
+        char *p = path_join(output, files[i]);
+        ensure_dir(path_dir(p));
+        put(p, files[i]);
+    }
+    /* Model xwin replacing/refetching or losing the seeded cache. */
+    if (manifest_tamper == 1) put(cached, "{\"packages\":[ ]}");
+    if (manifest_tamper == 2) put(cached, "{\"packages\":{}}"); /* same size */
+    if (manifest_tamper == 3) CHECK(remove_file(cached));
+    return 0;
+}
+
+static char *managed_test_channel(const char *payload, int items, int payloads) {
+    char *item = str_fmt("{\"id\":\"Microsoft.VisualStudio.Manifests.VisualStudio\",\"version\":\"test\",\"type\":\"Manifest\",\"payloads\":[%s%s%s]}",
+        payload, payloads == 2 ? "," : "", payloads == 2 ? payload : "");
+    return str_fmt("{\"channelItems\":[%s%s%s]}", item, items == 2 ? "," : "", items == 2 ? item : "");
+}
+
+static char *managed_test_payload(const char *hash_fields, const char *size_fields) {
+    return str_fmt("{\"fileName\":\"VisualStudio.vsman\",\"url\":\"https://example.invalid/VisualStudio.vsman\"%s%s}", hash_fields, size_fields);
+}
+
+static void managed_test_install(const char *channel, const char *download, int tamper, const char *version,
+    const char *want_error, int want_fetches, int want_helpers) {
+    char *dir = test_dir("cross-msvc-manifest-");
+    Toolchain tc = {0}; tc.root = dir; tc.cache_dir = path_join(dir, "cache");
+    Target t = {0}; t.arch = "x86_64"; t.os = "windows"; t.abi = "msvc";
+    char *helper = path_join(dir, "libexec", "xwin" NATIVE_EXE_SUFFIX);
+    ensure_dir(path_dir(helper));
+    put(helper, "offline fake helper");
+    Managed_Msvc_Helper h = {0}; h.binary_sha256 = msvc_digest("offline fake helper", strlen("offline fake helper"));
+    char *host = (char *)msvc_host();
+    Managed_Msvc_Lock lock = {0};
+    lock.hosts = &h; lock.host_names = &host; lock.host_count = 1;
+    lock.helper_version = (char *)version; lock.manifest_json = (char *)channel;
+    lock.sdk_version = "test-sdk"; lock.crt_version = "test-crt";
+    manifest_channel = channel; manifest_download = download; manifest_tamper = tamper;
+    manifest_fetches = manifest_helpers = 0;
+    char *error = msvc_install((Options){0}, tc, t, lock);
+    CHECK(manifest_fetches == want_fetches);
+    CHECK(manifest_helpers == want_helpers);
+    char *dest = msvc_resource_dir(tc, t);
+    if (want_error) {
+        CHECK(error && contains(error, want_error));
+        CHECK(!path_exists(dest));
+        CHECK(!path_exists(path_join(dest, "receipt.json")));
+        CHECK(!path_exists(path_join(dest, "complete")));
+        char *parent = path_dir(dest);
+        if (is_dir(parent)) {
+            Msvc_Dir_Entries entries = {0};
+            CHECK(msvc_read_dir(parent, &entries));
+            CHECK(entries.len == 0); /* no partial stage or hidden receipt */
+        }
+    } else {
+        CHECK(error == NULL);
+        CHECK(path_exists(path_join(dest, "receipt.json")));
+        CHECK(path_exists(path_join(dest, "complete")));
+        msvc_cached(tc, t, &error);
+        CHECK(error == NULL);
+    }
+    remove_tree(dir);
+}
+
+static void test_manifest_authentication(void) {
+    char *hash = str_fmt(",\"sha256\":\"%s\"", msvc_digest(manifest_bytes, strlen(manifest_bytes)));
+    char *size = str_fmt(",\"size\":%zu", strlen(manifest_bytes));
+    char *payload = managed_test_payload(hash, size);
+    char *channel = managed_test_channel(payload, 1, 1);
+#define INSTALL(c, d, t, e, f, h) managed_test_install(c, d, t, "xwin-0.10.0", e, f, h)
+    INSTALL(channel, manifest_bytes, 0, NULL, 1, 1);
+    INSTALL(channel, "{\"packages\":{}}", 0, "SHA-256 mismatch", 1, 0);
+    INSTALL(channel, "wrong size", 0, "SHA-256 mismatch", 1, 0);
+    INSTALL(channel, NULL, 0, "cannot open", 1, 0);
+    /* Correct SHA but incorrect pinned size must still refuse before helper. */
+    INSTALL(managed_test_channel(managed_test_payload(hash, ",\"size\":1"), 1, 1), manifest_bytes, 0, "byte-size mismatch", 1, 0);
+    INSTALL(channel, manifest_bytes, 1, "byte-size mismatch", 1, 1);
+    INSTALL(channel, manifest_bytes, 2, "SHA-256 mismatch", 1, 1);
+    INSTALL(channel, manifest_bytes, 3, "manifest is missing", 1, 1);
+    const char *bad_hashes[] = {"", ",\"sha256\":null", ",\"sha256\":\"\"", ",\"sha256\":\"gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg\""};
+    for (size_t i = 0; i < sizeof(bad_hashes) / sizeof(bad_hashes[0]); i++)
+        INSTALL(managed_test_channel(managed_test_payload(bad_hashes[i], size), 1, 1), manifest_bytes, 0, "download pin", 0, 0);
+    const char *bad_sizes[] = {"", ",\"size\":null", ",\"size\":\"15\"", ",\"size\":-1", ",\"size\":0", ",\"size\":1.5", ",\"size\":1e1", ",\"size\":999999999999999999999999"};
+    for (size_t i = 0; i < sizeof(bad_sizes) / sizeof(bad_sizes[0]); i++)
+        INSTALL(managed_test_channel(managed_test_payload(hash, bad_sizes[i]), 1, 1), manifest_bytes, 0, "pin", 0, 0);
+    INSTALL(managed_test_channel(payload, 2, 1), manifest_bytes, 0, "channel", 0, 0);
+    INSTALL(managed_test_channel(payload, 1, 2), manifest_bytes, 0, "selection", 0, 0);
+    INSTALL(managed_test_channel(managed_test_payload(str_fmt("%s%s", hash, hash), size), 1, 1), manifest_bytes, 0, "duplicate", 0, 0);
+    INSTALL(managed_test_channel(managed_test_payload(hash, str_fmt("%s%s", size, size)), 1, 1), manifest_bytes, 0, "duplicate", 0, 0);
+    INSTALL("{\"channelItems\":[],\"channelItems\":[]}", manifest_bytes, 0, "duplicate", 0, 0);
+    managed_test_install(channel, manifest_bytes, 0, "xwin-future", "cache contract", 0, 0);
+#undef INSTALL
+}
+
 static void test_source_scan(void) {
 #define NEEDS(text) msvc_source_needs_sdk((const uint8_t *)(text), strlen(text))
     CHECK(NEEDS("#include <stdio.h>\n"));
@@ -623,6 +754,7 @@ int main(void) {
     test_digest_and_lock();
     test_safe_paths_and_layout();
     test_cached_integrity();
+    test_manifest_authentication();
     test_source_scan();
     test_link_arguments();
     test_mingw_names();
