@@ -39,6 +39,16 @@ int main(int argc, char **argv) {
             require_seed(&o);
         } else if (!strcmp(argv[1], "--sdk")) {
             check_host_sdk(argv[2]);
+        } else if (!strcmp(argv[1], "--host-config")) {
+            SelfhostCfg c = {0};
+            o.host_config = argv[2];
+            load_host_config(&o, &c);
+        } else if (!strcmp(argv[1], "--darwin-nozstd")) {
+            Strs a = {0};
+            sp_link_tail(selfhost_host("darwin-arm64"), &a, "-lm -lzstd", NULL);
+        } else if (!strcmp(argv[1], "--abs-syslib")) {
+            Strs a = {0};
+            sp_link_tail(selfhost_host("windows-amd64"), &a, "/opt/builder/libfoo.a", NULL);
         } else if (!strcmp(argv[1], "--prepare")) {
             o.root = argv[2];
             prepare(&o);
@@ -122,7 +132,8 @@ int main(int argc, char **argv) {
     write_file(config, "#!/bin/sh\necho libLLVMSupport.a libLLVMDemangle.a\n");
     chmod(config, 0755);
     char *ndir = PJ(root, ".cache", "native");
-    write_selfhost(&o, ndir, llvm, sdk);
+    SelfhostCfg lc = {selfhost_host("linux-amd64"), llvm, sdk, ndir, NULL, NULL, "x86-64-v2", "2.34", 1};
+    write_selfhost(&o, &lc, NULL);
     Json *cfg = json_load(selfhost_config(&o));
     CHECK(!strcmp(jstr(cfg, "target"), "linux-amd64"));
     CHECK(!strcmp(jstr(cfg, "llvm-prefix"), ".cache/native/llvm"));
@@ -144,6 +155,74 @@ int main(int argc, char **argv) {
     /* -lstdc++ would be remapped to libc++ by cross_cc; no prebuilt backend either. */
     CHECK(!has(&ll, "-lstdc++") && !has(&ll, "-lc++") && !has(&ll, "-nostdlib"));
     for (int i = 0; i < ll.n; i++) CHECK(!contains(ll.v[i], root) && !contains(ll.v[i], "libcross_cc_backend"));
+
+    /* Host table and per-host recipes (mocks: no Apple or Microsoft SDK). */
+    CHECK(selfhost_host("linux-amd64") && selfhost_host("darwin-arm64") && selfhost_host("darwin-amd64") && selfhost_host("windows-amd64"));
+    CHECK(!selfhost_host("linux-arm64"));
+    CHECK(!strcmp(selfhost_host("darwin-arm64")->cc_target, "aarch64-macos") && !strcmp(selfhost_host("darwin-arm64")->cpu_flag, "-mcpu"));
+    Strs lb = sp_bridge_args(selfhost_host("linux-amd64"));
+    CHECK(lb.n == bridge.n);
+    for (int i = 0; i < lb.n && i < bridge.n; i++) CHECK(!strcmp(lb.v[i], bridge.v[i]));
+    Strs db = sp_bridge_args(selfhost_host("darwin-arm64"));
+    CHECK(db.n == 2 && !strcmp(db.v[0], "-isysroot") && !strcmp(db.v[1], "{sdk}"));
+    Strs wb = sp_bridge_args(selfhost_host("windows-amd64"));
+    CHECK(has(&wb, "{sdk}/crt/include") && has(&wb, "{sdk}/sdk/include/ucrt") && has(&wb, "-fms-runtime-lib=static") && has(&wb, "{root}/lib/include"));
+    Strs wh = {0};
+    sp_link_head(selfhost_host("windows-amd64"), &wh);
+    CHECK(has(&wh, "{windows_path}") && has(&wh, "{bridge}") && !has(&wh, "-Wl,--start-group"));
+    Strs dt = {0};
+    sp_link_tail(selfhost_host("darwin-arm64"), &dt, "-lm -lz -lzstd -lxml2", "/pinned/zstd/lib/libzstd.a");
+    CHECK(has(&dt, "/pinned/zstd/lib/libzstd.a") && !has(&dt, "-lzstd") && has(&dt, "-lc++") && has(&dt, "-L{sdk}/usr/lib") && has(&dt, "-lxml2"));
+    Strs wt = {0};
+    sp_link_tail(selfhost_host("windows-amd64"), &wt, "psapi.lib shell32.lib -lole32", NULL);
+    CHECK(has(&wt, "-lpsapi") && has(&wt, "-lshell32") && has(&wt, "-lole32") && has(&wt, "-L{sdk}/crt/lib/x86_64"));
+    CHECK(child(self, "--darwin-nozstd", "x") != 0);
+    CHECK(child(self, "--abs-syslib", "x") != 0);
+    CHECK(sp_release_only("{object}") && sp_release_only("{windows_path}") && !sp_release_only("{llvm}/lib/libLLVMSupport.a"));
+    CHECK(!strcmp(sp_expand("{root}/a:{sdk}/b:{llvm}/c", "R", "S", "L", "N"), "R/a:S/b:L/c"));
+    char *why = NULL;
+    char *apple = PJ(root, "MacOSX.sdk");
+    CHECK(!sp_sdk_ok(selfhost_host("darwin-arm64"), apple, &why) && why);
+    mkdirs(PJ(apple, "usr", "include", "c++", "v1"));
+    write_file(PJ(apple, "SDKSettings.json"), "{}\n");
+    CHECK(sp_sdk_ok(selfhost_host("darwin-arm64"), apple, &why));
+    char *splat = PJ(root, "splat");
+    CHECK(!sp_sdk_ok(selfhost_host("windows-amd64"), splat, &why) && contains(why, "license"));
+    for (int i = 0; MSVC_INCLUDES[i]; i++) mkdirs(PJ(splat, MSVC_INCLUDES[i]));
+    for (int i = 0; MSVC_LIBDIRS[i]; i++) mkdirs(PJ(splat, MSVC_LIBDIRS[i]));
+    CHECK(sp_sdk_ok(selfhost_host("windows-amd64"), splat, &why));
+
+    /* Generated darwin and windows recipes from the fake SDK. */
+    write_file(config, "#!/bin/sh\ncase \"$2\" in --libnames) echo libLLVMSupport.a libLLVMDemangle.a;; --system-libs) echo -lm -lz psapi.lib;; esac\n");
+    SelfhostCfg wc = {selfhost_host("windows-amd64"), llvm, splat, PJ(root, "wnative"), NULL, NULL, "x86-64-v2", NULL, 0};
+    write_selfhost(&o, &wc, NULL);
+    Json *wj = json_load(selfhost_config(&o));
+    CHECK(!strcmp(jstr(wj, "target"), "windows-amd64") && !strcmp(jstr(wj, "path-args"), "wnative/selfhost/bridge.args") && !*jstr_opt(wj, "linux-glibc"));
+    Strs wl = split_lines(read_file(PJ(root, "wnative", "selfhost", "link.args"), NULL));
+    CHECK(has(&wl, "{windows_path}") && has(&wl, "-lpsapi") && has(&wl, "{llvm}/lib/libLLVMSupport.a"));
+    SelfhostCfg dc = {selfhost_host("darwin-arm64"), llvm, apple, PJ(root, "dnative"), NULL, NULL, "generic", NULL, 0};
+    write_selfhost(&o, &dc, NULL);
+    Json *dj = json_load(selfhost_config(&o));
+    CHECK(!strcmp(jstr(dj, "target"), "darwin-arm64") && !strcmp(jstr(dj, "cpu"), "generic") && !strcmp(jstr(dj, "sdk"), "MacOSX.sdk"));
+
+    /* --host-config: complete recipes are read, mismatches refused. */
+    char *hc = PJ(root, "host.json");
+    mkdirs(PJ(llvm, "include", "llvm", "Config"));
+    write_file(PJ(llvm, "include", "llvm", "Config", "llvm-config.h"), "#define LLVM_VERSION_MAJOR 22\n#define LLVM_VERSION_MINOR 1\n#define LLVM_VERSION_PATCH 8\n");
+    write_file(hc, sfmt("{\"target\":\"%s\",\"llvm-prefix\":\".cache/native/llvm\",\"bridge-args\":\"wnative/selfhost/bridge.args\",\"link-args\":\"wnative/selfhost/link.args\",\"native-dir\":\"hcnative\"}", host_key()));
+    if (selfhost_host(host_key())) {
+        Opts ho = o;
+        ho.host_config = hc;
+        SelfhostCfg hcfg = {0};
+        load_host_config(&ho, &hcfg);
+        CHECK(!strcmp(hcfg.native, PJ(root, "hcnative")) && !strcmp(hcfg.llvm, llvm) && !hcfg.auto_linux && !strcmp(hcfg.cpu, hcfg.h->cpu));
+        CHECK(!strcmp(selfhost_config(&ho), hc));
+        CHECK(child(self, "--host-config", hc) != 0); /* child root is cwd: recipe paths missing */
+    }
+    write_file(hc, "{\"target\":\"no-such-host\",\"llvm-prefix\":\"x\",\"bridge-args\":\"x\",\"link-args\":\"x\"}");
+    CHECK(child(self, "--host-config", hc) != 0);
+    write_file(hc, sfmt("{\"target\":\"%s\"}", host_key()));
+    CHECK(child(self, "--host-config", hc) != 0);
 
     if (failures) return 1;
     remove_all(root);
