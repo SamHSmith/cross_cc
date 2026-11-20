@@ -849,7 +849,62 @@ static char *msvc_fetch(const char *url, const char *expected, const char *dest,
     return NULL;
 }
 
+typedef struct { const char *url, *sha256; int64_t size; } Msvc_Manifest_Pin;
+
+static bool msvc_manifest_unique_keys(const Json *j) {
+    if (!j) return false;
+    for (size_t i = 0; i < j->len; i++) {
+        if (j->type == J_OBJ) for (size_t k = 0; k < i; k++) if (streq(j->keys[i], j->keys[k])) return false;
+        if (!msvc_manifest_unique_keys(j->items[i])) return false;
+    }
+    return true;
+}
+
+static char *msvc_manifest_pin(Managed_Msvc_Lock lock, Msvc_Manifest_Pin *pin) {
+    /* This cache contract is specific to the authenticated xwin 0.10.0 helper.
+       Reject ambiguous channels rather than authenticate a different item from
+       the first Manifest selected by xwin's get_package_manifest. */
+    if (!streq(nz(lock.helper_version), "xwin-0.10.0")) return str_copy("unsupported Microsoft manifest helper cache contract");
+    Json *root = j_parse(nz(lock.manifest_json), strlen(nz(lock.manifest_json)));
+    if (!msvc_manifest_unique_keys(root)) return str_copy("invalid or duplicate pinned Microsoft manifest fields");
+    Json *items = j_get(root, "channelItems");
+    if (!items || items->type != J_ARR || items->len != 1) return str_copy("invalid pinned Microsoft manifest channel");
+    Json *item = items->items[0];
+    Json *payloads = j_get(item, "payloads");
+    if (!streq(j_str(item, "type"), "Manifest") ||
+        !streq(j_str(item, "id"), "Microsoft.VisualStudio.Manifests.VisualStudio") ||
+        !j_str(item, "version")[0] || !payloads || payloads->type != J_ARR || payloads->len != 1)
+        return str_copy("invalid pinned Microsoft manifest selection");
+    Json *payload = payloads->items[0];
+    pin->url = j_str(payload, "url");
+    pin->sha256 = j_str(payload, "sha256");
+    Json *size = j_get(payload, "size");
+    if (!streq(j_str(payload, "fileName"), "VisualStudio.vsman") ||
+        !starts_with(pin->url, "https://") || strlen(pin->sha256) != 64 ||
+        strspn(pin->sha256, "0123456789abcdef") != 64 || !size || size->type != J_NUM ||
+        !size->text[0] || strspn(size->text, "0123456789") != strlen(size->text))
+        return str_copy("invalid Microsoft manifest SHA-256/size download pin");
+    errno = 0;
+    pin->size = strtoll(size->text, NULL, 10);
+    if (errno == ERANGE || pin->size <= 0) return str_copy("invalid Microsoft manifest byte-size pin");
+    return NULL;
+}
+
+static char *msvc_manifest_verify(const char *path, Msvc_Manifest_Pin pin) {
+    int64_t size;
+    char *modified, *error = NULL;
+    if (!msvc_stat(path, &size, &modified)) return str_copy("pinned Microsoft manifest is missing");
+    if (size != pin.size) return str_copy("Microsoft manifest byte-size mismatch");
+    char *digest = msvc_file_digest(path, &error);
+    if (error) return error;
+    if (!streq(digest, pin.sha256)) return str_copy("Microsoft manifest SHA-256 mismatch");
+    return NULL;
+}
+
 static char *msvc_install(Options o, Toolchain tc, Target t, Managed_Msvc_Lock lock) {
+    Msvc_Manifest_Pin manifest_pin = {0};
+    char *pin_error = msvc_manifest_pin(lock, &manifest_pin);
+    if (pin_error) return pin_error;
     const Managed_Msvc_Helper *pin = NULL;
     for (size_t i = 0; i < lock.host_count; i++) if (streq(lock.host_names[i], msvc_host())) pin = &lock.hosts[i];
     if (!pin) return str_copy("no authenticated Microsoft resource extraction helper for this host; use --cross-cc-msvc=system or --libc/--sysroot (managed download is unavailable on this host)");
@@ -888,13 +943,23 @@ static char *msvc_install(Options o, Toolchain tc, Target t, Managed_Msvc_Lock l
     }
     char *manifest_path = path_join(stage, "channel.json");
     const char *manifest = nz(lock.manifest_json);
-    if (!manifest[0]) { error = str_copy("cannot encode pinned Microsoft manifest"); goto done; }
     if (!write_file(manifest_path, manifest, strlen(manifest))) { error = str_copy("cannot write pinned Microsoft manifest"); goto done; }
+    /* xwin 0.10.0 manifest.rs:get_package_manifest deliberately skips the
+       manifest checksum. ctx.rs:get_and_validate uses cache-dir/dl/<name>
+       verbatim on a cache hit. Seed that exact path in our private stage with
+       authenticated bytes, not merely an unrelated verified download. */
+    char *payload_cache = path_join(stage, "payloads");
+    char *manifest_cache = path_join(payload_cache, "dl", str_fmt("pkg_manifest_%s.vsman", manifest_pin.sha256));
+    ensure_dir(path_dir(manifest_cache));
+    error = msvc_fetch(manifest_pin.url, manifest_pin.sha256, manifest_cache, o.verbose);
+    if (error) { error = str_fmt("cannot authenticate pinned Microsoft manifest: %s", error); goto done; }
+    error = msvc_manifest_verify(manifest_cache, manifest_pin);
+    if (error) goto done;
     char *output = path_join(stage, "resources");
     const char *arch = nz(t.arch);
     if (streq(arch, "arm") || streq(arch, "thumb")) arch = "aarch";
     StrVec cmd = SV(helper, "--accept-license", "--manifest", manifest_path, "--sdk-version", lock.sdk_version,
-        "--crt-version", lock.crt_version, "--arch", arch, "--variant", "desktop", "--cache-dir", path_join(stage, "payloads"),
+        "--crt-version", lock.crt_version, "--arch", arch, "--variant", "desktop", "--cache-dir", payload_cache,
         "splat", "--output", output);
 #ifdef _WIN32
     /* Windows' filesystem is case-insensitive and symlink creation may require
@@ -904,6 +969,10 @@ static char *msvc_install(Options o, Toolchain tc, Target t, Managed_Msvc_Lock l
     /* Only the dedicated, lock-scoped consent above authorizes this argument.
        XWIN_ACCEPT_LICENSE and generic environment consent are never consulted. */
     if (run_command(cmd, o.verbose) != 0) { error = str_copy("managed Microsoft resource acquisition failed; no partial installation was published"); goto done; }
+    /* A deleted/replaced cache must not let a helper refetch mutable metadata
+       and publish resources derived from unauthenticated manifest bytes. */
+    error = msvc_manifest_verify(manifest_cache, manifest_pin);
+    if (error) goto done;
     if (!msvc_layout_valid(msvc_managed_layout(output, t))) { error = str_copy("downloaded Microsoft resource layout is incomplete"); goto done; }
     Managed_Msvc_Files files = {0};
     error = msvc_inventory(output, "", &files);
