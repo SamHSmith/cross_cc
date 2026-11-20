@@ -87,9 +87,9 @@ static int mock_compiler(int argc, char **argv) {
     int compile = has_argument(argc, argv, "-c");
     const char *out = ar ? (argc > 2 ? argv[2] : "") : argument(argc, argv, "-o");
     if (!*out) fail("mock compiler missing output");
-    int seed_stage = contains(out, "/host-stage1.stage/");
+    int seed_stage = same_fs_path(path_dir(out), PJ(root, "build", "release", "host-stage1.stage"));
     const char *expected = seed_stage ? PJ(root, "seed") : root;
-    if (strcmp(env_get("CROSS_CC_ROOT"), expected)) fail("mock resource isolation: expected %s, got %s", expected, env_get("CROSS_CC_ROOT"));
+    if (!same_fs_path(env_get("CROSS_CC_ROOT"), expected)) fail("mock resource isolation: expected %s, got %s", expected, env_get("CROSS_CC_ROOT"));
     FILE *log = fopen(PJ(root, "commands.log"), "ab");
     if (!log) fail("mock log");
     fprintf(log, "%s %s %s resource-root=%s\n", seed_stage ? "seed" : "current", ar ? "ar" : compile ? "compile" : "link", out, expected);
