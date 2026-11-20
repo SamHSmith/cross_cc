@@ -4,6 +4,10 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/file.h>
+#include <unistd.h>
 #endif
 
 char *embedded_tool_dir(Toolchain tc)
@@ -34,6 +38,30 @@ char *embedded_tool_dir(Toolchain tc)
                            str_fmt("tools-%016llx", (unsigned long long)runtime_hash(identity)));
     if (file_exists(path_join(dest, "complete")))
         return dest;
+#ifndef _WIN32
+    /* Only cold provisioning is serialized. Keep this sibling inode permanently:
+       unlinking it could let a new opener bypass waiters on the old lock. The
+       kernel releases the lock on exit (including fatal errors or signals). */
+    char *lock_path = str_fmt("%s.lock", dest);
+    int lock = open(lock_path, O_CREAT | O_RDWR | O_CLOEXEC, 0600);
+    if (lock < 0)
+        fatal(str_fmt("cannot open embedded tools lock %s: %s", lock_path, strerror(errno)));
+    while (flock(lock, LOCK_EX))
+    {
+        if (errno == EINTR)
+            continue;
+        int e = errno;
+        close(lock);
+        fatal(str_fmt("cannot acquire embedded tools lock %s: %s", lock_path, strerror(e)));
+    }
+    /* A preceding publisher may have completed while we were waiting. Do not
+       even create a stage or hardlink the executable in that case. */
+    if (file_exists(path_join(dest, "complete")))
+    {
+        close(lock);
+        return dest;
+    }
+#endif
     char *error = NULL, *work = make_temp_dir(tc.cache_dir, "tools-stage-", &error);
     if (error)
         fatal(error);
@@ -50,6 +78,9 @@ char *embedded_tool_dir(Toolchain tc)
     }
     error = runtime_publish(work, dest);
     remove_tree(work);
+#ifndef _WIN32
+    close(lock);
+#endif
     if (error)
         fatal(error);
     return dest;
