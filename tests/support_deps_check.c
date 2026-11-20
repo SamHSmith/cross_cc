@@ -1,9 +1,16 @@
-/* Support-library test. Build with any C compiler, then:
+/* Cold-cache priming check (no real compiler, archives or network):
+ *   support_deps_check --prime-mock /abs/workdir
+ * Drives sd_static_lib against a mock compiler and verifies the single no-target
+ * `cc -dumpmachine` query, its env/cwd, ordering before every compile, preserved
+ * concurrency, and that a failing query aborts before any compile starts.
+ *
+ * Support-library test. Build with any C compiler, then:
  *   support_deps_test /abs/cross_cc /abs/linux-release-deps-prefix [/abs/workdir]
  * Compiles a program with the seed (`cross_cc cc`, linux gnu 2.34 x86-64-v2) against the
  * prefix's zlib, zstd and libxml2, runs it: zlib roundtrip, multithreaded zstd roundtrip,
  * libxml2 parse and schema validation of a valid and an invalid document. */
-#define _POSIX_C_SOURCE 200809L
+#include "../tools/common.h"
+#include "../tools/support_deps.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -54,7 +61,101 @@ static int run(char *const argv[], int quiet) {
     return WIFEXITED(st) ? WEXITSTATUS(st) : 128;
 }
 
+
+#define PCHECK(c) do { if (!(c)) { fprintf(stderr, "prime-mock FAIL line %d: %s\n", __LINE__, #c); return 1; } } while (0)
+
+static const char MOCK_SH[] =
+    "#!/bin/sh\n"
+    "d=\"$(dirname \"$0\")\"\n"
+    "echo \"$$ $PWD|CACHE=$CROSS_CC_CACHE_DIR|TMP=$TMPDIR|ROOT=$CROSS_CC_ROOT|ARGS=$*\" >> \"$d/log\"\n"
+    "case \"$2\" in\n"
+    "-dumpmachine) [ -f \"$d/fail\" ] && exit 7; echo mock-machine; exit 0;;\n"
+    "esac\n"
+    "if [ \"$1\" = ar ]; then : > \"$3\"; exit 0; fi\n"
+    "mkdir \"$d/live.$$\"; sleep 1; n=$(ls -d \"$d\"/live.* | wc -l); echo $n >> \"$d/conc\"; rmdir \"$d/live.$$\"\n"
+    "while [ $# -gt 0 ]; do [ \"$1\" = -o ] && : > \"$2\"; shift; done\n"
+    "exit 0\n";
+
+static int count_lines(const char *path, const char *needle, int *first) {
+    char *t = exists(path) ? read_file(path, NULL) : NULL;
+    int n = 0, i = 0;
+    if (first) *first = -1;
+    if (!t) return 0;
+    for (char *save = NULL, *l = strtok_r(t, "\n", &save); l; l = strtok_r(NULL, "\n", &save), i++)
+        if (strstr(l, needle)) { if (!n && first) *first = i; n++; }
+    return n;
+}
+
+static int prime_mock(const char *work) {
+    char *mdir = PJ(work, "mock"), *cc = PJ(mdir, "cross_cc");
+    char *log = PJ(mdir, "log"), *conc = PJ(mdir, "conc");
+    char *src = PJ(work, "src"), *cache = PJ(work, "cache"), *tmp = PJ(work, "tmp");
+    remove_all(work);
+    mkdirs(mdir); mkdirs(src);
+    write_file(PJ(mdir, "upstream.lock.json"), "{}\n");
+    write_file(cc, MOCK_SH);
+    chmod(cc, 0755);
+    Strs env = sd_seed_env(cc, cache, tmp, NULL);
+    SdCtx c = {0};
+    c.compiler = cc;
+    strs_add(&c.target, "-target");
+    strs_add(&c.target, "x86_64-linux-gnu.2.34");
+    c.env = env.v;
+    c.jobs = 4;
+    static const char *const srcs[] = {"a.c", "b.c", "c.c", "d.c", "e.c", "f.c", "g.c", "h.c", NULL};
+    Strs flags = {0};
+    strs_add(&flags, "-O2");
+
+    /* Success: exactly one query, first, no -target, same cwd/env as the compiles. */
+    sd_static_lib(&c, src, srcs, &flags, PJ(work, "obj"), PJ(work, "libt.a"));
+    PCHECK(is_file(PJ(work, "libt.a")));
+    int first;
+    PCHECK(count_lines(log, "ARGS=cc -dumpmachine", &first) == 1);
+    PCHECK(first == 0);
+    PCHECK(count_lines(log, "-dumpmachine", NULL) == 1);
+    PCHECK(count_lines(log, "-target", NULL) == 8);
+    PCHECK(count_lines(log, "ARGS=cc -target x86_64-linux-gnu.2.34 -O2 -c ", NULL) == 8);
+    PCHECK(count_lines(log, "ARGS=ar rcs ", NULL) == 1);
+    PCHECK(count_lines(log, sfmt("%s|CACHE=%s|TMP=%s|ROOT=%s|ARGS=cc -dumpmachine", src, cache, tmp, mdir), NULL) == 1);
+    PCHECK(count_lines(log, sfmt("%s|CACHE=%s|TMP=%s|ROOT=%s|ARGS=cc -target", src, cache, tmp, mdir), NULL) == 8);
+    /* Concurrency survives the initializer: some compile saw >1 live peers. */
+    char *ct = read_file(conc, NULL);
+    int peak = 0;
+    for (char *save = NULL, *l = strtok_r(ct, "\n", &save); l; l = strtok_r(NULL, "\n", &save)) if (atoi(l) > peak) peak = atoi(l);
+    PCHECK(peak > 1 && peak <= 4);
+
+    /* jobs == 1: no pool concurrency to protect, so no query. */
+    remove_file(log);
+    c.jobs = 1;
+    sd_static_lib(&c, src, srcs, &flags, PJ(work, "obj"), PJ(work, "libt.a"));
+    PCHECK(count_lines(log, "-dumpmachine", NULL) == 0);
+    c.jobs = 4;
+
+    /* Failing query: abort (nonzero exit) before any compile or archive. */
+    remove_file(log);
+    write_file(PJ(mdir, "fail"), "x\n");
+    remove_file(PJ(work, "libt.a"));
+    fflush(stdout); fflush(stderr);
+    pid_t pid = fork();
+    if (pid == 0) {
+        sd_static_lib(&c, src, srcs, &flags, PJ(work, "obj"), PJ(work, "libt.a"));
+        _exit(0);
+    }
+    int st = 0;
+    waitpid(pid, &st, 0);
+    PCHECK(WIFEXITED(st) && WEXITSTATUS(st) != 0);
+    PCHECK(count_lines(log, "-dumpmachine", NULL) == 1);
+    PCHECK(count_lines(log, "", NULL) == 1);
+    PCHECK(!is_file(PJ(work, "libt.a")));
+    puts("support_deps_check --prime-mock: PASS");
+    return 0;
+}
+
 int main(int argc, char **argv) {
+    if (argc == 3 && !strcmp(argv[1], "--prime-mock")) {
+        if (argv[2][0] != '/') { fputs("usage: support_deps_check --prime-mock /abs/workdir\n", stderr); return 2; }
+        return prime_mock(argv[2]);
+    }
     if (argc < 3 || argv[1][0] != '/' || argv[2][0] != '/') { fputs("usage: support_deps_test /abs/cross_cc /abs/prefix [/abs/workdir]\n", stderr); return 2; }
     const char *cc = argv[1], *prefix = argv[2];
     char work[4096];

@@ -50,10 +50,24 @@ static void sd_ar(const SdCtx *c, const char *cwd, const Strs *args) {
     if (code != 0) fail("ar failed (exit %d)", code);
 }
 
+/* Immutable-v1 cold-cache bootstrap: a cold shared compiler cache raced by many
+ * concurrent `cc -c` children has failed on macOS. One no-target `cc -dumpmachine`
+ * with the exact batch compiler/env/cwd initializes the cache's tools-* entries
+ * (it never starts the LLVM backend, so c->target is deliberately not passed)
+ * before any pool child starts. A nonzero exit aborts before the pool. */
+static void sd_prime(const SdCtx *c, const char *cwd) {
+    if (c->jobs <= 1) return;
+    char *argv[] = {(char *)c->compiler, "cc", "-dumpmachine", NULL};
+    char *out = NULL;
+    int code = run_capture(argv, cwd, c->env, &out);
+    if (code != 0) fail("compiler cache initialization (cc -dumpmachine) failed (exit %d)", code);
+}
+
 /* Compile srcs (relative to srcdir) with flags into objdir, then archive into lib. */
 static void sd_static_lib(const SdCtx *c, const char *srcdir, const char *const *srcs, const Strs *flags, const char *objdir, const char *lib) {
     remove_all(objdir);
     mkdirs(objdir);
+    sd_prime(c, srcdir);
     Pool pool = {0};
     pool.limit = c->jobs;
     Strs objs = {0};
