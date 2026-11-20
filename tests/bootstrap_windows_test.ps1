@@ -21,6 +21,13 @@ function Check([string]$name, $actual, $expected) {
     if ($actual -ne $expected) { Write-Host "FAIL $name`n  got      $actual`n  expected $expected"; $script:failures++ }
     else { Write-Host "ok   $name" }
 }
+# PowerShell 5.1 resolves a relative -Value against the current directory
+# while creating the link. Use the link's directory, preserving its relative target.
+function New-TestSymlink([string]$path, [string]$target) {
+    Push-Location -LiteralPath (Split-Path -Parent $path)
+    try { New-Item -ItemType SymbolicLink -Path $path -Value $target | Out-Null }
+    finally { Pop-Location }
+}
 try {
     $real = Join-Path $fixture 'real.exe'
     [IO.File]::WriteAllText($real, 'x')
@@ -37,22 +44,22 @@ try {
     $sub = Join-Path $fixture 'sub'
     [IO.Directory]::CreateDirectory($sub) | Out-Null
     try {
-        New-Item -ItemType SymbolicLink -Path (Join-Path $sub 'rel.exe') -Value '..\real.exe' | Out-Null
+        New-TestSymlink (Join-Path $sub 'rel.exe') '..\real.exe'
     } catch { $canSym = $false; Write-Host "SKIP symlink tests: $($_.Exception.Message)" }
     if ($canSym) {
         Check 'relative symlink' (Resolve-Compiler (Join-Path $sub 'rel.exe')) $real
-        New-Item -ItemType SymbolicLink -Path (Join-Path $fixture 'abs.exe') -Value $real | Out-Null
+        New-TestSymlink (Join-Path $fixture 'abs.exe') $real
         Check 'absolute symlink' (Resolve-Compiler (Join-Path $fixture 'abs.exe')) $real
-        New-Item -ItemType SymbolicLink -Path (Join-Path $fixture 'chain.exe') -Value 'abs.exe' | Out-Null
+        New-TestSymlink (Join-Path $fixture 'chain.exe') 'abs.exe'
         Check 'symlink chain' (Resolve-Compiler (Join-Path $fixture 'chain.exe')) $real
         $a = Join-Path $fixture 'a.exe'
         $b = Join-Path $fixture 'b.exe'
         $cycleOk = $true
         try {
             [IO.File]::WriteAllText($b, 'x')
-            New-Item -ItemType SymbolicLink -Path $a -Value 'b.exe' | Out-Null
+            New-TestSymlink $a 'b.exe'
             Remove-Item -LiteralPath $b -Force
-            New-Item -ItemType SymbolicLink -Path $b -Value 'a.exe' | Out-Null
+            New-TestSymlink $b 'a.exe'
         } catch { $cycleOk = $false; Write-Host "SKIP cycle test: cannot build cycle: $($_.Exception.Message)" }
         if ($cycleOk) {
         $msg = ''
