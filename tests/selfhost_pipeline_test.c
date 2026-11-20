@@ -1,11 +1,19 @@
 /* Offline pipeline regression: this executable also acts as a deterministic
  * mock cross_cc seed, raw Clang/ar aliases, and packaging helper. No SDK/network
- * or production system compiler is used. Compile the TEST HARNESS with cc:
- * cc -std=c11 -O0 -o build/tests/selfhost_pipeline_test tests/selfhost_pipeline_test.c
- */
+ * or production system compiler is used. Compile the TEST HARNESS with cross_cc:
+ * cross_cc cc -std=c11 -O0 -o build/tests/selfhost_pipeline_test tests/selfhost_pipeline_test.c
+ *
+ * Only the Windows source-acquisition boundary is replaced below. The real
+ * helper (including its authentication checks) is compiled unchanged first;
+ * release.c then calls the mock instead. This tests pipeline orchestration,
+ * not authentication/compilation of actual LLVM sources. */
+#include "../tools/windows_path/windows_path.c"
+static void mock_wp_prepare(const char *, const char *, const char *, const char *, char **, char **);
+#define wp_prepare mock_wp_prepare
 #define main cross_cc_release_main
 #include "../tools/release.c"
 #undef main
+#undef wp_prepare
 
 static int failures;
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); failures++; } } while (0)
@@ -14,6 +22,25 @@ static void put(const char *path, const char *text) {
     mkdirs(path_dir(path));
     write_file(path, text);
 }
+
+#define MOCK_LLVM_ARCHIVE "mock LLVM source archive\n"
+static void mock_wp_prepare(const char *archive, const char *expected, const char *strip_prefix, const char *dir, char **source, char **gen) {
+    const char *root = env_get("SELFHOST_MOCK_ROOT");
+    /* Assert the acquisition call is bound to the fixture's cached input. No
+     * real source hash or authentication function is substituted globally. */
+    if (strcmp(archive, PJ(root, ".cache", "downloads", "mock-llvm.tar")) ||
+        strcmp(expected, sha256_bytes(MOCK_LLVM_ARCHIVE, strlen(MOCK_LLVM_ARCHIVE))) ||
+        strcmp(sha256_file(archive), expected) || strcmp(strip_prefix, "mock-llvm")) fail("unexpected mock LLVM acquisition inputs");
+    if (exists(dir)) fail("input stage already exists: %s", dir);
+    *source = PJ(dir, "llvm", "lib", "Support", "Path.cpp");
+    *gen = PJ(dir, "gen");
+    put(*source, "mock LLVM Path.cpp\n");
+    put(PJ(dir, "llvm", "lib", "Support", "Windows", "Path.inc"), "mock Windows Path.inc\n");
+    put(PJ(dir, "llvm", "LICENSE.TXT"), "mock LLVM license\n");
+    put(PJ(*gen, "llvm", "Config", "config.h"), WP_CONFIG);
+    put(PJ(dir, "inputs.txt"), sfmt("recipe mock-llvm-windows-forward-path-v1\narchive-sha256 %s\nsource-sha256 %s\nwindows-path-inc-sha256 %s\nconfig-sha256 %s\noption LLVM_WINDOWS_PREFER_FORWARD_SLASH=1\n", expected, sha256_file(*source), sha256_file(PJ(dir, "llvm", "lib", "Support", "Windows", "Path.inc")), sha256_file(PJ(*gen, "llvm", "Config", "config.h"))));
+}
+
 static const char *argument(int argc, char **argv, const char *key) {
     for (int i = 1; i + 1 < argc; i++) if (!strcmp(argv[i], key)) return argv[i + 1];
     return "";
@@ -24,14 +51,15 @@ static int has_argument(int argc, char **argv, const char *key) {
 }
 
 static int mock_package(int argc, char **argv) {
-    const char *output = "", *binary = "";
+    const char *output = "", *binary = "", *target = "";
     for (int i = 1; i < argc; i++) {
         if (starts_with(argv[i], "--output=")) output = argv[i] + 9;
         if (starts_with(argv[i], "--binary=")) binary = argv[i] + 9;
+        if (starts_with(argv[i], "--target=")) target = argv[i] + 9;
     }
-    if (!*output || !*binary) fail("mock package missing arguments");
+    if (!*output || !*binary || !*target) fail("mock package missing arguments");
     mkdirs(output);
-    copy_file(PJ(output, "cross_cc"), binary);
+    copy_file(PJ(output, starts_with(target, "windows-") ? "cross_cc.exe" : "cross_cc"), binary);
     put(PJ(output, "lib", "fixture.h"), "mock resources\n");
     return 0;
 }
@@ -54,7 +82,13 @@ static int mock_compiler(int argc, char **argv) {
         for (int i = 1; i < argc; i++) if (starts_with(argv[i], "-O")) last_opt = argv[i];
         int debug = !strcmp(env_get("SELFHOST_PROFILE"), "debug");
         if (strcmp(last_opt, debug ? "-O0" : "-O2")) fail("wrong compile profile for %s: %s", out, last_opt);
-        if (debug && (!has_argument(argc, argv, "-g") || has_argument(argc, argv, "-DNDEBUG"))) fail("debug flags missing/contradictory");
+        int path = ends_with(out, "llvm-WindowsPath.cpp.o");
+        if (debug && (!has_argument(argc, argv, "-g") || (!path && has_argument(argc, argv, "-DNDEBUG")))) fail("debug flags missing/contradictory");
+        if (path) {
+            for (int i = 0; wp_flags[i]; i++) if (!has_argument(argc, argv, wp_flags[i])) fail("missing Path.cpp flag %s", wp_flags[i]);
+            if (!has_argument(argc, argv, "Path.cpp") || !is_file("Path.cpp")) fail("Path.cpp compile cwd/input not isolated");
+            fprintf(log, "%s windows-path-profile %s\n", seed_stage ? "seed" : "current", last_opt);
+        }
         int cpp = !strcmp(name, "cross_clang" EXE_SUFFIX);
         fprintf(log, "%s-profile %s\n", cpp ? "c++" : "c", last_opt);
         Buf object = {0};
@@ -93,6 +127,9 @@ static char *fixture(const char *base, const char *label, const char *self) {
     put(PJ(root, "seed", "upstream.lock.json"), "{}\n");
     put(PJ(root, "toolchain.lock.json"), "{\"native\":{\"sources\":[\"bridge.cpp\"]}}\n");
     put(PJ(root, "upstream.lock.json"), "{}\n");
+    put(PJ(root, ".cache", "downloads", "mock-llvm.tar"), MOCK_LLVM_ARCHIVE);
+    put(PJ(root, "compiler-rt.lock.json"), sfmt("{\"url\":\"https://invalid.example/mock-llvm.tar\",\"sha256\":\"%s\",\"strip_prefix\":\"mock-llvm\"}\n", sha256_bytes(MOCK_LLVM_ARCHIVE, strlen(MOCK_LLVM_ARCHIVE))));
+    put(PJ(root, "tools", "windows_path", "windows_path.c"), "mock Path.cpp provenance input\n");
     put(PJ(root, "main.c"), "mock driver\n");
     put(PJ(root, "src", "driver.h"), "mock header\n");
     const char *tools[] = {"release.c", "build.c", "common.h", "linux-release-deps.c", "macos-x64-llvm.c", NULL};
@@ -116,7 +153,8 @@ static char *fixture(const char *base, const char *label, const char *self) {
     /* Deliberately no native/libcross_cc_backend.a or linker-flags.txt. */
     put(PJ(root, "recipes", "bridge.args"), "-O3\n-fPIC\n");
     put(PJ(root, "recipes", "link.args"), "{object}\n{version}\n{lld_version}\n{bridge}\n");
-    put(PJ(root, "config", "host.json"), sfmt("{\"target\":\"%s\",\"llvm-prefix\":\"llvm\",\"native-dir\":\"native\",\"bridge-args\":\"recipes/bridge.args\",\"link-args\":\"recipes/link.args\",\"linux-glibc\":\"2.34\"}\n", host()));
+    put(PJ(root, "recipes", "windows-link.args"), "{object}\n{version}\n{lld_version}\n{windows_path}\n{bridge}\n");
+    put(PJ(root, "config", "host.json"), sfmt("{\"target\":\"%s\",\"llvm-prefix\":\"llvm\",\"native-dir\":\"native\",\"bridge-args\":\"recipes/bridge.args\",\"link-args\":\"recipes/%s\",\"linux-glibc\":\"2.34\"}\n", host(), starts_with(host(), "windows-") ? "windows-link.args" : "link.args"));
     return root;
 }
 
@@ -208,8 +246,37 @@ static void cross_and_matrix_test(const char *base, const char *self) {
     strs_addf(&matrix_args, "--matrix=%s", matrix);
     CHECK(invoke(root, "release", "", &matrix_args, &out) == 0);
     CHECK(exists(PJ(root, "dist", "matrix.zip")));
+    /* Exercise the Windows Path orchestration on every host, not just Windows.
+     * Debug Path deliberately retains wp_flags' NDEBUG/static-CRT policy. */
+    put(matrix, "{\"targets\":[{\"target\":\"windows-amd64\",\"llvm-prefix\":\"llvm\",\"native-dir\":\"native\",\"bridge-args\":\"recipes/bridge.args\",\"link-args\":\"recipes/windows-link.args\",\"output\":\"dist/windows\"}]}\n");
+    int code = invoke(root, "debug", "", &matrix_args, &out);
+    CHECK(code == 0);
+    if (code) { fprintf(stderr, "%s\n", out); return; }
+    receipt = read_file(PJ(root, "dist", "windows.build-manifest.txt"), NULL);
+    CHECK(contains(receipt, "windows-canonical-paths true"));
+    CHECK(contains(receipt, "recipe mock-llvm-windows-forward-path-v1"));
+    CHECK(contains(receipt, "artifact ") && contains(receipt, "llvm-WindowsPath.cpp.o"));
+    CHECK(contains(receipt, "windows-path-input "));
+    CHECK(exists(PJ(root, "dist", "windows.zip")));
+    CHECK(exists(PJ(root, "dist", "windows.zip.sha256")));
+    CHECK(is_file(PJ(root, "dist", "windows", "cross_cc.exe")));
+    char *path_arg = strstr(receipt, sfmt("link-arg %s", PJ(root, "build", "release", "windows-amd64.stage", "llvm-WindowsPath.cpp.o")));
+    char *bridge_arg = strstr(receipt, sfmt("link-arg %s", PJ(root, "build", "release", "windows-amd64.stage", "libcross_cc_backend.a")));
+    CHECK(path_arg && bridge_arg && path_arg < bridge_arg);
+    Strs commands = split_lines(read_file(PJ(root, "commands.log"), NULL));
+    int path_compiles = 0;
+    for (int i = 0; i < commands.n; i++) if (!strcmp(commands.v[i], "current windows-path-profile -O0")) path_compiles++;
+    CHECK(path_compiles == 4); /* twice in each of stage2 and stage3 */
+    char *bad_windows = replace_all(read_file(matrix, NULL), "dist/windows", "dist/windows-bad");
     put(matrix, "{\"targets\":[{\"target\":\"linux-amd64\"},{\"target\":\"linux-amd64\"}]}\n");
     CHECK(invoke(root, "release", "", &matrix_args, &out) != 0);
+    put(matrix, bad_windows);
+    CHECK(invoke(root, "debug", "1", &matrix_args, &out) != 0);
+    CHECK(contains(read_file(PJ(root, "build", "release", "windows-amd64.stage", "bridge.cpp.o"), NULL), "nonrepeatable C++ object"));
+    CHECK(!exists(PJ(root, "dist", "windows-bad.build-manifest.txt")));
+    CHECK(!exists(PJ(root, "dist", "windows-bad.zip")));
+    /* A retained failed stage must still be rejected, never silently reset. */
+    CHECK(invoke(root, "debug", "", &matrix_args, &out) != 0);
 }
 
 int main(int argc, char **argv) {
