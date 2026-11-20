@@ -3,8 +3,85 @@
 #include "../src/libc_config.c"
 #include "../src/support.c"
 #include "../src/target.c"
-#include "../src/toolchain.c"
 #include <assert.h>
+
+static size_t assertions;
+#define CHECK(expr)                                                                                \
+    do                                                                                             \
+    {                                                                                              \
+        assertions++;                                                                              \
+        if (!(expr))                                                                               \
+        {                                                                                          \
+            fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr);                             \
+            exit(1);                                                                               \
+        }                                                                                          \
+    } while (0)
+#ifndef _WIN32
+#include <signal.h>
+#include <sys/file.h>
+
+/* Observe only embedded_tool_dir's side effects, not the fixture's setup. */
+static bool tools_forbid_mutations, tools_interrupt_lock, tools_die_in_stage;
+static int tools_lock_probe = -1;
+static unsigned tools_lock_calls, tools_stage_calls, tools_publish_calls;
+static int test_tools_flock(int fd, int operation)
+{
+    tools_lock_calls++;
+    CHECK(fcntl(fd, F_GETFD) & FD_CLOEXEC);
+    if (tools_interrupt_lock)
+    {
+        tools_interrupt_lock = false;
+        errno = EINTR;
+        return -1;
+    }
+    if (tools_lock_probe >= 0)
+    {
+        /* Signal only after proving this process reached a contended lock. */
+        CHECK(flock(fd, operation | LOCK_NB) == -1);
+        CHECK(errno == EWOULDBLOCK || errno == EAGAIN);
+        CHECK(write(tools_lock_probe, "L", 1) == 1);
+        close(tools_lock_probe);
+        tools_lock_probe = -1;
+    }
+    return flock(fd, operation);
+}
+static char *test_tools_stage(const char *parent, const char *prefix, char **error)
+{
+    CHECK(!tools_forbid_mutations);
+    tools_stage_calls++;
+    if (tools_die_in_stage)
+        raise(SIGKILL);
+    return make_temp_dir(parent, prefix, error);
+}
+static bool test_tools_link(const char *src, const char *dest)
+{
+    CHECK(!tools_forbid_mutations);
+    return link_file(src, dest);
+}
+static bool test_tools_copy(const char *dest, const char *src)
+{
+    CHECK(!tools_forbid_mutations);
+    return copy_file(dest, src);
+}
+static bool test_tools_remove(const char *path)
+{
+    CHECK(!tools_forbid_mutations);
+    return remove_tree(path);
+}
+#define flock test_tools_flock
+#define make_temp_dir test_tools_stage
+#define link_file test_tools_link
+#define copy_file test_tools_copy
+#define remove_tree test_tools_remove
+#endif
+#include "../src/toolchain.c"
+#ifndef _WIN32
+#undef flock
+#undef make_temp_dir
+#undef link_file
+#undef copy_file
+#undef remove_tree
+#endif
 
 /* Isolate argument/command construction from runtime builds and LLVM in this unit binary.
    The real callbacks and their integration are covered by the runtime/resource suites. */
@@ -20,10 +97,19 @@ uint64_t runtime_hash(const char *text)
 }
 char *runtime_publish(const char *work, const char *dest)
 {
+#ifndef _WIN32
+    CHECK(!tools_forbid_mutations);
+    tools_publish_calls++;
+    /* Match runtime_publish's marker-before-rename contract without runtime builds. */
+    CHECK(write_file(path_join(work, "complete"), "test\n", 5));
+    CHECK(move_path(work, dest));
+    return NULL;
+#else
     (void)work;
     (void)dest;
     assert(!"unit test unexpectedly provisions embedded tools");
     return "unexpected provision";
+#endif
 }
 StrVec runtime_cxx_flags(Target t, const char *lib)
 {
@@ -136,17 +222,6 @@ bool ubsan_full_supported(Target t)
     return true;
 }
 
-static size_t assertions;
-#define CHECK(expr)                                                                                \
-    do                                                                                             \
-    {                                                                                              \
-        assertions++;                                                                              \
-        if (!(expr))                                                                               \
-        {                                                                                          \
-            fprintf(stderr, "%s:%d: %s\n", __FILE__, __LINE__, #expr);                             \
-            exit(1);                                                                               \
-        }                                                                                          \
-    } while (0)
 #define EQ(a, b)                                                                                   \
     do                                                                                             \
     {                                                                                              \
@@ -550,6 +625,86 @@ static void support_tests(void)
     EQ(path_base("/a/b/"), "b");
     EQ(path_dir("name"), ".");
 }
+static void embedded_tools_tests(void)
+{
+#ifndef _WIN32
+    /* Every wait is pipe-synchronized; alarm bounds failures without sleeps. */
+    alarm(20);
+    char *error = NULL, *tmp = env("TMPDIR");
+    char *cache = make_temp_dir(*tmp ? tmp : ".", "cross-tools-", &error);
+    CHECK(!error);
+    Toolchain tc = {.cache_dir = cache};
+    tools_interrupt_lock = true;
+    char *dest = embedded_tool_dir(tc);
+    CHECK(tools_lock_calls == 2 && tools_stage_calls == 1 && tools_publish_calls == 1);
+    CHECK(file_exists(path_join(dest, "complete")));
+    CHECK(file_exists(path_join(dest, EMBEDDED_DSYMUTIL_NAME)));
+    char *lock_path = str_fmt("%s.lock", dest);
+    int lock = open(lock_path, O_RDWR | O_CLOEXEC);
+    CHECK(lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) == 0);
+    struct stat before, after;
+    CHECK(fstat(lock, &before) == 0);
+    CHECK(remove_tree(dest));
+
+    int ready[2];
+    CHECK(pipe(ready) == 0);
+    pid_t child = fork();
+    CHECK(child >= 0);
+    if (!child)
+    {
+        alarm(10);
+        close(lock); /* Do not retain the parent's shared flock description. */
+        close(ready[0]);
+        tools_lock_probe = ready[1];
+        tools_forbid_mutations = true;
+        tools_lock_calls = tools_stage_calls = tools_publish_calls = 0;
+        CHECK(streq(embedded_tool_dir(tc), dest));
+        CHECK(tools_lock_calls == 1 && !tools_stage_calls && !tools_publish_calls);
+        _exit(0);
+    }
+    close(ready[1]);
+    char signal;
+    CHECK(read(ready[0], &signal, 1) == 1 && signal == 'L');
+    close(ready[0]);
+    /* A different destination is not serialized behind this cold publisher. */
+    char *other = path_join(cache, "other");
+    ensure_dir(other);
+    CHECK(file_exists(path_join(embedded_tool_dir((Toolchain){.cache_dir = other}), "complete")));
+    /* Model the winning publisher's marker becoming visible before unlock. */
+    ensure_dir(dest);
+    CHECK(write_file(path_join(dest, "cross_clang"), "winner", 6));
+    CHECK(write_file(path_join(dest, "complete"), "test\n", 5));
+    unsigned locks = tools_lock_calls;
+    tools_forbid_mutations = true;
+    EQ(embedded_tool_dir(tc), dest); /* Hot readers must not wait on our lock. */
+    CHECK(tools_lock_calls == locks);
+    tools_forbid_mutations = false;
+    CHECK(close(lock) == 0);
+    int status;
+    CHECK(waitpid(child, &status, 0) == child && WIFEXITED(status) && WEXITSTATUS(status) == 0);
+    EQ(read_file(path_join(dest, "cross_clang"), NULL), "winner");
+    CHECK(stat(lock_path, &after) == 0 && before.st_dev == after.st_dev && before.st_ino == after.st_ino);
+
+    /* An abruptly killed cold publisher cannot leave a stale held lock. */
+    CHECK(remove_tree(dest));
+    child = fork();
+    CHECK(child >= 0);
+    if (!child)
+    {
+        alarm(10);
+        tools_die_in_stage = true;
+        embedded_tool_dir(tc);
+        _exit(99);
+    }
+    CHECK(waitpid(child, &status, 0) == child && WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL);
+    lock = open(lock_path, O_RDWR | O_CLOEXEC);
+    CHECK(lock >= 0 && flock(lock, LOCK_EX | LOCK_NB) == 0);
+    CHECK(close(lock) == 0);
+    CHECK(file_exists(path_join(embedded_tool_dir(tc), "complete")));
+    CHECK(remove_tree(cache));
+    alarm(0);
+#endif
+}
 int main(int argc, char **argv)
 {
     if (argc > 2 && streq(argv[1], "--capture-child"))
@@ -571,6 +726,7 @@ int main(int argc, char **argv)
     symlink_path_tests();
     command_tests();
     libc_tests();
+    embedded_tools_tests();
     printf("core: %zu assertions passed\n", assertions);
     return 0;
 }
