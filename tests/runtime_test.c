@@ -325,6 +325,40 @@ static void test_cache_and_hashes(void) {
   assert(!streq(runtime_cache("musl", (Options){0}, t, a),
                 runtime_cache("musl", (Options){0}, t, c)));
 }
+static void test_msvc_stackprobe_ownership(void) {
+  const char *arches[] = {"x86_64", "x86", "aarch64"};
+  const char *probes[] = {"x86_64/chkstk.S", "i386/chkstk2.S",
+                          "aarch64/chkstk.S"};
+  for (size_t i = 0; i < 3; i++) {
+    Target t = {.arch = (char *)arches[i], .os = "windows", .abi = "msvc"};
+    bool ok = false;
+    StrVec standalone = builtins_link_sources((Options){.no_libc = true}, t,
+                                               &ok);
+    assert(ok && rt_has(standalone, probes[i]));
+    StrVec crt = builtins_link_sources((Options){0}, t, &ok);
+    assert(ok && !rt_has(crt, probes[i]) && crt.len + 1 == standalone.len);
+    assert(rt_has(crt, "divdi3.c"));
+    if (i < 2)
+      assert(rt_has(crt, "cpu_model/x86.c"));
+    for (int mode = 0; mode < 2; mode++) {
+      Options o = {.no_libc = true};
+      o.no_stdlib = mode == 0;
+      o.no_defaultlibs = mode == 1;
+      char *e = NULL;
+      assert(streq(prepare_builtins(o, t, (Toolchain){0}, &e), "") && !e);
+    }
+    /* GNU and freestanding inventories retain their existing recipes. */
+    t.abi = "gnu";
+    expect_vec(builtins_link_sources((Options){0}, t, &ok),
+               builtins_sources(t.arch, t.os, t.abi, &ok));
+    assert(ok);
+    t.os = "freestanding";
+    t.abi = "";
+    expect_vec(builtins_link_sources((Options){0}, t, &ok),
+               builtins_sources(t.arch, t.os, t.abi, &ok));
+    assert(ok);
+  }
+}
 static void test_recipes(void) {
   StrVec recipes[] = {
       wasi_bottom_half_files, wasi_top_half_files, wasi_fts_files,
@@ -741,6 +775,7 @@ int main(int argc, char **argv) {
   test_libc_suppression();
   test_bare_links(dir);
   test_cache_and_hashes();
+  test_msvc_stackprobe_ownership();
   test_recipes();
   test_library_names();
   test_library_fuzz();
