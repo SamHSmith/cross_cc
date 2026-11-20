@@ -187,9 +187,14 @@ static char *sd_seed_root(const char *compiler) {
         if (!is_abs(forced) || !is_dir(forced)) fail("CROSS_CC_SEED_ROOT must be an absolute directory: %s", forced);
         return xstrdup(forced);
     }
+#ifdef _WIN32
+    char *dir = abs_path(compiler); /* launchers resolve the selected compiler */
+    for (char *p = dir; *p; p++) if (*p == '\\') *p = '/';
+#else
     char *real = realpath(compiler, NULL);
     char *dir = real ? xstrdup(real) : xstrdup(compiler);
     free(real);
+#endif
     char *slash = strrchr(dir, '/');
     if (slash) *slash = 0;
     char *cands[] = {dir, PJ(dir, ".."), PJ(dir, "..", "share", "cross_cc"), NULL};
@@ -217,15 +222,23 @@ static Strs sd_seed_env(const char *compiler, const char *cachedir, const char *
 
 /* ---- Receipt manifest -----------------------------------------------------
  * Text of "<sha256>  <relative path>" for every regular file below each listed
- * directory of prefix, sorted. Symlinks are listed by name only. */
+ * directory of prefix, sorted. Symlink targets are recorded without following. */
 static void sd_manifest_dir(Buf *b, const char *prefix, const char *rel) {
     char *dir = PJ(prefix, rel);
     Strs names = {0};
     if (!list_dir(dir, &names)) return;
     for (int i = 0; i < names.n; i++) {
         char *r = PJ(rel, names.v[i]), *full = PJ(prefix, r);
-        if (is_symlink(full)) buf_addf(b, "symlink  %s\n", r);
-        else if (is_dir(full)) sd_manifest_dir(b, prefix, r);
+        if (is_symlink(full)) {
+#ifndef _WIN32
+            char target[4096];
+            ssize_t n = readlink(full, target, sizeof target);
+            if (n < 0 || (size_t)n == sizeof target) fail("cannot record dependency symlink %s", full);
+            buf_addf(b, "symlink  %s -> %.*s\n", r, (int)n, target);
+#else
+            fail("dependency symlink receipts are unsupported on Windows");
+#endif
+        } else if (is_dir(full)) sd_manifest_dir(b, prefix, r);
         else if (is_file(full)) buf_addf(b, "%s  %s\n", sha256_file(full), r);
     }
 }
