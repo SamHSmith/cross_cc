@@ -245,15 +245,12 @@ static void test_resource_dependency_make_tokens(void) {
     char *error = NULL;
     /* "\\" is a literal filename character on POSIX but a separator on Windows,
        where the canonical real path spells it "/". */
+    char *got = resource_dependency_text(text, target, "/real/\xe7\xa9\xba space/#hash/$dollar/back\\slash/lib", &error);
 #ifdef _WIN32
-#define BACK_SLASH_IN "back\\slash"
-#define BACK_SLASH_OUT "back/slash"
+    const char *prefix = "/real/\xe7\xa9\xba\\ space/\\#hash/$$dollar/back/slash/lib";
 #else
-#define BACK_SLASH_IN "back\\slash"
-#define BACK_SLASH_OUT "back\\slash"
+    const char *prefix = "/real/\xe7\xa9\xba\\ space/\\#hash/$$dollar/back\\slash/lib";
 #endif
-    char *got = resource_dependency_text(text, target, "/real/\xe7\xa9\xba space/#hash/$dollar/" BACK_SLASH_IN "/lib", &error);
-    const char *prefix = "/real/\xe7\xa9\xba\\ space/\\#hash/$$dollar/" BACK_SLASH_OUT "/lib";
     char *expected = str_fmt("%s user\\ file.c /cross_cc/library/other.h \\\n  %s/include/a\\ b.h user/cross_cc/lib/a.h dollar$$.h %s/a\\#b.h\n\n%s/include/a\\ b.h:\n", target, prefix, prefix, prefix);
     CHECK_STR(err_of(error), "");
     CHECK_STR(got, expected);

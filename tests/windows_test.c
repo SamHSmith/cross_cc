@@ -800,6 +800,10 @@ int main(void) {
     test_source_scan();
     test_link_arguments();
     test_mingw_names();
-    printf("windows_test: %d checks, %d failures (Linux host; Windows-native paths not run)\n", checks, failures);
+#ifdef _WIN32
+    printf("windows_test: %d checks, %d failures (Windows host; see explicit skips above)\n", checks, failures);
+#else
+    printf("windows_test: %d checks, %d failures (POSIX host; Windows-native paths not run)\n", checks, failures);
+#endif
     return failures ? 1 : 0;
 }
