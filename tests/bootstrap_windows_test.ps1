@@ -2,7 +2,13 @@
 # Extracts the function via AST; does not run the bootstrap.
 $ErrorActionPreference = 'Stop'
 $checkout = Split-Path -Parent $PSScriptRoot
-$ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $checkout 'build.ps1'), [ref]$null, [ref]$null)
+$tokens = $null
+$parseErrors = $null
+$ast = [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $checkout 'build.ps1'), [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors -and $parseErrors.Count -gt 0) {
+    $parseErrors | ForEach-Object { Write-Host "PARSE ERROR: $($_.Message) at line $($_.Extent.StartLineNumber)" }
+    throw 'build.ps1 has parse errors'
+}
 $fn = $ast.Find({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Resolve-Compiler' }, $true)
 if (!$fn) { throw 'Resolve-Compiler not found in build.ps1' }
 . ([scriptblock]::Create($fn.Extent.Text))
@@ -25,7 +31,7 @@ try {
     New-Item -ItemType HardLink -Path $hard -Value $real | Out-Null
     $hard = (Get-Item -LiteralPath $hard).FullName
     Check 'hard link keeps its own path' (Resolve-Compiler $hard) $hard
-    Check 'relative path uses caller' (Resolve-Compiler 'hard.exe') $hard
+    Check 'relative path uses caller' (Resolve-Compiler '.\hard.exe') $hard
 
     $canSym = $true
     $sub = Join-Path $fixture 'sub'
@@ -39,11 +45,20 @@ try {
         Check 'absolute symlink' (Resolve-Compiler (Join-Path $fixture 'abs.exe')) $real
         New-Item -ItemType SymbolicLink -Path (Join-Path $fixture 'chain.exe') -Value 'abs.exe' | Out-Null
         Check 'symlink chain' (Resolve-Compiler (Join-Path $fixture 'chain.exe')) $real
-        New-Item -ItemType SymbolicLink -Path (Join-Path $fixture 'a.exe') -Value 'b.exe' | Out-Null
-        New-Item -ItemType SymbolicLink -Path (Join-Path $fixture 'b.exe') -Value 'a.exe' | Out-Null
+        $a = Join-Path $fixture 'a.exe'
+        $b = Join-Path $fixture 'b.exe'
+        $cycleOk = $true
+        try {
+            [IO.File]::WriteAllText($b, 'x')
+            New-Item -ItemType SymbolicLink -Path $a -Value 'b.exe' | Out-Null
+            Remove-Item -LiteralPath $b -Force
+            New-Item -ItemType SymbolicLink -Path $b -Value 'a.exe' | Out-Null
+        } catch { $cycleOk = $false; Write-Host "SKIP cycle test: cannot build cycle: $($_.Exception.Message)" }
+        if ($cycleOk) {
         $msg = ''
         try { Resolve-Compiler (Join-Path $fixture 'a.exe') | Out-Null } catch { $msg = $_.Exception.Message }
         Check 'symlink cycle' $msg 'compiler symlink chain is too long'
+        }
     }
 } finally {
     $full = [IO.Path]::GetFullPath($fixture)
