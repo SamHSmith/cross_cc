@@ -25,26 +25,78 @@ Use `--cross-cc-msvc=system` for an installed SDK. MinGW needs no Microsoft SDK.
 
 ## Build
 
-Requires a C11 compiler, a C++17 compiler, curl, tar and make. Windows builds need
-an MSVC developer shell. The driver and build tools are C; the LLVM bridge uses
-LLVM's C++ API.
+Build with **cross_cc**, not a system C/C++ compiler or Make:
 
 ```sh
-make REFERENCE=1 setup
-make
-make test
+./build.sh                         # build bin/cross_cc and its tool aliases
+./build.sh --profile=debug         # same pipeline, different optimization flags
+./build.sh setup --reference       # prepare the optional test-reference compiler
+./build.sh test
+./build.sh help
 ```
 
-See `tools/build.c` and `tools/release.c` (`--help`) for options and releases.
+On Windows, use `build.cmd` in place of `./build.sh`. The small shell/PowerShell
+entry point selects a compiler and compiles the C build tools; all dependency,
+compile, link, test and packaging logic lives in `tools/`.
+
+Compiler selection, in order:
+
+1. `--compiler=/path/to/cross_cc` (or `CROSS_CC_COMPILER`).
+2. `cross_cc` installed on `PATH`.
+3. The matching checked-in [v1 backstop](backstop/v1/README.md), verified against
+   `backstop/v1/SHA256SUMS` and extracted under `.cache/bootstrap/`.
+
+Use the **host** compiler package and keep its executable and resources together.
+Symlinks are resolved before selection. Set `CROSS_CC_SEED_ROOT` only for an
+unusual installation whose resource root cannot be found beside or above the
+executable. An invalid explicit compiler fails rather than silently falling back.
+
+Normal builds and releases share the staged build in `tools/release.c`:
+
+```text
+selected cross_cc → fresh current cross_cc → final cross_cc
+                                              ↓
+                           rebuild with final compiler and compare SHA-256
+```
+
+The bridge, version objects, driver and final link are rebuilt in each stage.
+A native build checks compiler convergence and same-path object/executable
+repeatability before publishing. A cross build cannot execute its target, so it
+checks repeated compilation with the freshly built host compiler instead; that
+is recorded as repeatability, not native convergence. Receipts record the seed
+hash and the verified output hashes. Debug and release use the same stages.
+
+`./build.sh release` uses this pipeline and packages the result. On Windows,
+pass `--host-sdk=DIR` (or `CROSS_CC_HOST_SDK`) for an MSVC + Windows SDK in xwin
+splat layout (`crt/`, `sdk/`) whose license you already accepted. On macOS,
+`--host-sdk=DIR`, `SDKROOT`, or `xcrun` locates the Apple SDK; pinned zstd is built
+automatically. Intel Mac also needs a prepared LLVM 22.1.8 `LLVM_PREFIX`, since
+upstream publishes no matching Intel Mac archive.
+
+Cross releases also need the target LLVM SDK, platform SDK and literal
+bridge/link recipes. `--host-sdk` always selects the build host's SDK; release
+`--sdk` selects the target's. See `build/tools/release --help` for `--target`,
+`--matrix`, `--llvm-prefix`, `--bridge-args`, `--link-args`, dependency notices
+and the authenticated `--msvc-helper` required in Mac release bundles.
+`./build.sh package` can package an already built compiler.
+
+The host needs curl and tar; Linux backstop extraction also needs unzip and
+sha256sum (or shasum), and macOS uses its built-in tar and shasum. Windows uses
+PowerShell's ZIP and SHA-256 support. No Make, configure, system compiler or system
+linker is used in the normal/release pipeline. Apple and Microsoft targets still
+need the applicable SDK inputs and license acceptance; the compiler backstop is
+**not a complete offline release-rebuild kit**. The optional Intel Mac LLVM SDK
+source-build utility has its own CMake/Ninja prerequisites; ordinary builds use
+a prepared, matching static LLVM SDK.
+
 Dependencies and compatibility inputs are pinned in the root `*.lock.json` files.
-The bulk headers and runtime sources are not stored in Git. `make` prepares them
-under `lib/` from the SHA-256-pinned source archive; `make resources` does only
-that step. A cold source build needs network access or a preseeded
-`.cache/downloads/zig-0.17.1.tar.xz`. Once prepared, resources are reused offline;
-`make resources` also reconstructs them offline from the verified cached archive.
-Release bundles still contain the complete resource tree: ordinary compilation
-does not download these sources. See [lib/README.md](lib/README.md) for cache
-recovery and refresh instructions.
+Bulk headers/runtime sources are reconstructed under ignored `lib/` directories;
+`./build.sh resources` does only that step. Cold builds need the pinned archives
+from the network or a preseeded cache, including LLVM development libraries and
+support inputs—not just the compiler ZIP. Completed caches can be reused offline.
+All scratch stays under the checkout, not `/tmp`. Release bundles still include
+the complete resource tree, so ordinary compilation needs no source downloads.
+See [lib/README.md](lib/README.md) for resource cache recovery and refresh.
 
 ## Reproducibility and limits
 

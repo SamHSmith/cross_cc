@@ -94,7 +94,7 @@ int main(int argc, char **argv) {
     /* Do not overwrite a tree with unknown provenance or an interrupted stage. */
     remove_file(PJ(root, "lib", ".resources-receipt"));
     CHECK(prepare_child(self, root, "unrecognized or stale resources") != 0);
-    /* Direct commands bypass make; they must still fail before creating output. */
+    /* Direct C-tool commands must still fail before creating output. */
     char *build_args[] = {self, "--build", root, NULL};
     char *package_args[] = {self, "--package", root, NULL};
     CHECK(run_cmd(build_args, NULL, NULL) != 0);

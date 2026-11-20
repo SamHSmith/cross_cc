@@ -3,6 +3,7 @@
  * Compiles a program with the seed (`cross_cc cc`, linux gnu 2.34 x86-64-v2) against the
  * prefix's zlib, zstd and libxml2, runs it: zlib roundtrip, multithreaded zstd roundtrip,
  * libxml2 parse and schema validation of a valid and an invalid document. */
+#define _POSIX_C_SOURCE 200809L
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

@@ -1,14 +1,14 @@
-/* darwin-amd64 release support: static x86_64 zstd, compiled from a fixed source list
- * with the selected cross_cc (no Make). Plain C, run on macOS:
- *   tools/macos-x64-llvm --compiler=/abs/cross_cc [--work=DIR] [--jobs=N] [--build-llvm]
- * Without --compiler the first cross_cc on PATH is used. The default run produces only
- * WORK/zstd. --build-llvm additionally runs the OPTIONAL LLVM-from-source build below
- * (needs Xcode, CMake and Ninja; it is not part of the ordinary build path).
- * LLVM publishes no official macOS x86_64 archive after 20.1.7, so this builds the
- * pinned llvm-project source (compiler-rt.lock.json, fetched by tools/build setup)
- * with Apple's clang for x86_64, plus a static x86_64 zstd from the linux_release_deps
- * zstd pin in toolchain.lock.json. The result is WORK/prefix (tools/release
- * --llvm-prefix) with WORK/zstd/lib/libzstd.a. Needs Xcode, CMake, Ninja and curl. */
+/* Apple host support: static zstd for amd64 or arm64, compiled from a fixed
+ * source list with the selected cross_cc, without Make/configure/system compilers.
+ *   tools/macos-x64-llvm --compiler=/abs/cross_cc --arch=arm64 --sdk=DIR --work=DIR
+ * Without --compiler the first cross_cc on PATH is used. Produces WORK/zstd,
+ * including headers, notices and a compiler/recipe/output-bound receipt.
+ *
+ * OPTIONAL --build-llvm additionally builds the Intel LLVM SDK in WORK/prefix.
+ * LLVM publishes no official macOS x86_64 archive after 20.1.7. This separate
+ * dependency-source utility uses the compiler-rt.lock.json LLVM source pin and
+ * needs Apple's clang, Xcode, CMake and Ninja. Normal builds never invoke it;
+ * Intel hosts supply an already prepared LLVM_PREFIX instead. */
 #include "common.h"
 #include "support_deps.h"
 

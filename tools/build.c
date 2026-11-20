@@ -30,7 +30,8 @@ static const char USAGE[] =
     "\n"
     "options: --compiler=FILE --profile=debug|release --jobs=N --deps-prefix=DIR (exact\n"
     "  linux-release-deps prefix; default .cache/support/linux-amd64-<key>; darwin: holds lib/libzstd.a)\n"
-    "  --sdk=DIR --host-config=FILE --reference\n"
+    "  --host-sdk=DIR --host-config=FILE --reference\n"
+    "  --sdk=DIR is a host-sdk alias except for release, where it selects the target SDK\n"
     "environment: LLVM_PREFIX (LLVM 22.1.8 static SDK instead of the pinned archive),\n"
     "  CROSS_CC_SEED_ROOT (seed resources; else found above the seed binary),\n"
     "  CROSS_CC_HOST_SDK (windows-amd64 MSVC splat, like --sdk)\n"
@@ -1198,6 +1199,9 @@ static void write_selfhost(const Opts *o, SelfhostCfg *c, const char *zstd, cons
     json_field(&j, "link-mode", "cc", 0);
     json_field(&j, "cpu", c->cpu, 0);
     if (c->glibc) json_field(&j, "linux-glibc", c->glibc, 0);
+    char *notices = !strcmp(h->kind, "linux") ? PJ(c->sdk, "licenses") :
+                    zstd ? PJ(path_dir(path_dir(zstd)), "licenses") : PJ(rdir, "licenses");
+    if (is_dir(notices)) json_field(&j, "extra-licenses", root_rel(o, notices), 0);
     json_field(&j, "native-dir", root_rel(o, c->native), 1);
     buf_str(&j, "}\n");
     write_file(selfhost_config(o), buf_cstr(&j));
@@ -1213,7 +1217,11 @@ static char *msvc_libxml2(const Opts *o, const SelfhostCfg *c) {
     strs_addf(&flags, "%s=%s", c->h->cpu_flag, c->cpu);
     Strs b = sp_bridge_args(c->h);
     for (int i = 0; i < b.n; i++) strs_add(&flags, sp_expand(b.v[i], o->seed_root, c->sdk, c->llvm, c->native));
-    return prepare_libxml2(o, c->native, seed_alias(o, "cross_clang"), seed_alias(o, "llvm-ar"), &flags);
+    char *lib = prepare_libxml2(o, c->native, seed_alias(o, "cross_clang"), seed_alias(o, "llvm-ar"), &flags);
+    char *notices = PJ(c->native, "selfhost", "licenses");
+    mkdirs(notices);
+    copy_file(PJ(notices, "libxml2-Copyright"), PJ(path_dir(lib), "src", "Copyright"));
+    return lib;
 }
 
 /* System Apple SDK: --sdk, SDKROOT, else xcrun's (a locator, not a compiler). */
@@ -1458,6 +1466,7 @@ int main(int argc, char **argv) {
         if (starts_with(a, "--compiler=")) o.compiler = xstrdup(a + 11);
         else if (starts_with(a, "--deps-prefix=")) o.deps_prefix = xstrdup(a + 14);
         else if (starts_with(a, "--host-config=")) o.host_config = xstrdup(a + 14);
+        else if (starts_with(a, "--host-sdk=")) o.host_sdk = xstrdup(a + 11);
         else if (starts_with(a, "--jobs=")) {
             o.jobs = parse_jobs(a + 7); /* local preparation only; release.c has no --jobs */
         } else if (is_release) strs_add(&o.forward, a);

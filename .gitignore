@@ -8,7 +8,7 @@
 *.obj
 *.exe
 
-# SHA-256-pinned resources populated by `make resources` / setup.
+# SHA-256-pinned resources populated by the C build tool.
 /lib/include/
 /lib/libc/
 /lib/libcxx/

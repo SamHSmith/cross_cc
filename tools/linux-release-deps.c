@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
     static const char *const manifest_dirs[] = {"lib", "include", "licenses", "sysroot/usr/include/c++", "sysroot/usr/include/x86_64-linux-gnu/c++", "sysroot/usr/lib/gcc", NULL};
     Buf hb = {0};
     buf_addf(&hb, "recipe linux-release-deps-v2\nlock %s\ncompiler %s\n", sha256_file(lock), sha256_file(o.cc));
-    buf_addf(&hb, "source-file %s tools/linux-release-deps.c\nsource-file %s tools/support_deps.h\ntarget", sha256_file(PJ(o.root, "tools", "linux-release-deps.c")), sha256_file(PJ(o.root, "tools", "support_deps.h")));
+    buf_addf(&hb, "source-file %s tools/linux-release-deps.c\nsource-file %s tools/support_deps.h\nsource-file %s tools/common.h\ntarget", sha256_file(PJ(o.root, "tools", "linux-release-deps.c")), sha256_file(PJ(o.root, "tools", "support_deps.h")), sha256_file(PJ(o.root, "tools", "common.h")));
     for (int i = 0; i < o.sd.target.n; i++) buf_addf(&hb, " %s", o.sd.target.v[i]);
     buf_addf(&hb, "\nmanifest\n");
     const char *header = buf_cstr(&hb);

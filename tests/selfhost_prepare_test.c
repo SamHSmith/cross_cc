@@ -155,8 +155,11 @@ int main(int argc, char **argv) {
     chmod(config, 0755);
     char *ndir = PJ(root, ".cache", "native");
     SelfhostCfg lc = {selfhost_host("linux-amd64"), llvm, sdk, ndir, NULL, NULL, "x86-64-v2", "2.34", 1};
+    mkdirs(PJ(sdk, "licenses"));
+    write_file(PJ(sdk, "licenses", "zlib-LICENSE"), "fixture notice\n");
     write_selfhost(&o, &lc, NULL, NULL);
     Json *cfg = json_load(selfhost_config(&o));
+    CHECK(!strcmp(jstr(cfg, "extra-licenses"), "sdk/licenses"));
     CHECK(!strcmp(jstr(cfg, "target"), "linux-amd64"));
     CHECK(!strcmp(jstr(cfg, "llvm-prefix"), ".cache/native/llvm"));
     CHECK(!strcmp(jstr(cfg, "sdk"), "sdk"));
@@ -240,8 +243,12 @@ int main(int argc, char **argv) {
     write_file(PJ(llvm, "lib", "libclangBasic.a"), "");
     write_file(PJ(llvm, "lib", "liblldCommon.a"), "");
     SelfhostCfg dc = {selfhost_host("darwin-arm64"), llvm, apple, PJ(root, "dnative"), NULL, NULL, "generic", NULL, 0};
-    write_selfhost(&o, &dc, NULL, NULL);
+    char *zprefix = PJ(root, "apple-zstd");
+    mkdirs(PJ(zprefix, "licenses"));
+    write_file(PJ(zprefix, "licenses", "zstd-LICENSE"), "fixture notice\n");
+    write_selfhost(&o, &dc, PJ(zprefix, "lib", "libzstd.a"), NULL);
     Json *dj = json_load(selfhost_config(&o));
+    CHECK(!strcmp(jstr(dj, "extra-licenses"), "apple-zstd/licenses"));
     CHECK(!strcmp(jstr(dj, "target"), "darwin-arm64") && !strcmp(jstr(dj, "cpu"), "generic") && !strcmp(jstr(dj, "sdk"), "MacOSX.sdk"));
 
     /* --host-config: complete recipes are read, mismatches refused. */

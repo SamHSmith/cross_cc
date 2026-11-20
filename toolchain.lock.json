@@ -1,9 +1,9 @@
 {
-  "note": "Pins for tools/build.c. The test reference binary and libbacktrace pins live in upstream.lock.json; headers and runtime sources are checked in under lib/.",
+  "note": "Pins for the C build tools. Resource sources, the test reference binary and libbacktrace pins live in upstream.lock.json; generated lib/ resources are not tracked in Git.",
 
   "llvm": {
     "pinned_version": "22.1.8",
-    "note": "Host-specific official static LLVM/Clang/LLD archives are pinned under native.hosts. The build tool can use the system C++ compiler or the downloaded clang++; LLVM_PREFIX accepts an existing matching static installation."
+    "note": "Host-specific official static LLVM/Clang/LLD archives are pinned under native.hosts. Normal and release builds compile with the selected cross_cc seed; LLVM_PREFIX accepts an existing matching static installation."
   },
   "linux_release_deps": {
     "zlib": {

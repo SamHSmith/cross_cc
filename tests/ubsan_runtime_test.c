@@ -6,6 +6,7 @@
  *
  *   cc -std=c11 -Isrc -Itests -o build/ubsan_runtime_test tests/ubsan_runtime_test.c
  *   build/ubsan_runtime_test [clang]        (default: $CLANG or "clang")
+ *   CROSS_CC_TEST_LINKER=/path/to/ld.lld selects the embedded linker for links.
  *
  * POSIX hosts only; run from the repository root. Without a host clang the
  * test reports SKIP and succeeds. */
@@ -159,7 +160,12 @@ static int header_ok(const char *err) {
 
 int main(int argc, char **argv) {
     const char *clang = argc > 1 ? argv[1] : getenv("CLANG") ? getenv("CLANG") : "clang";
-    char cmd[16384], runtime[4096];
+    char cmd[16384], runtime[4096], link_flag[8192] = "";
+    const char *linker = getenv("CROSS_CC_TEST_LINKER");
+    if (linker && *linker) {
+        if (access(linker, X_OK) != 0) { fprintf(stderr, "FAIL test linker is not executable: %s\n", linker); return 1; }
+        snprintf(link_flag, sizeof link_flag, "--ld-path='%s'", linker);
+    }
     snprintf(cmd, sizeof cmd, "%s --version >/dev/null 2>&1", clang);
     if (system(cmd) != 0) { printf("SKIP ubsan runtime test: no host clang (%s)\n", clang); return 0; }
     /* Large outputs stay off tmpfs: $TMPDIR, else ~/.cache/cross-cc-build-tmp. */
@@ -210,8 +216,8 @@ int main(int argc, char **argv) {
             snprintf(exe, sizeof exe, "%s/%s%s", dir, c->name, opts[o]);
             snprintf(err, sizeof err, "%s.err", exe);
             write_file(src, c->source);
-            snprintf(cmd, sizeof cmd, "%s -std=gnu11 %s -w %s -fno-sanitize-link-runtime %s %s -o %s",
-                clang, opts[o], c->flags, src, runtime, exe);
+            snprintf(cmd, sizeof cmd, "%s -std=gnu11 %s -w %s -fno-sanitize-link-runtime %s %s %s -o %s",
+                clang, opts[o], c->flags, link_flag, src, runtime, exe);
             if (system(cmd) != 0) { fprintf(stderr, "FAIL %s%s build: %s\n", c->name, opts[o], cmd); failed++; continue; }
             snprintf(cmd, sizeof cmd, "%s 2>%s", exe, err);
             int status = system(cmd);

@@ -1,6 +1,7 @@
 # Downloaded headers and runtime sources
 
-`make resources` (also run by `make`, `make setup`, `make test`, and packaging)
+`./build.sh resources` (also run by the build, setup, test and packaging commands;
+use `build.cmd` on Windows)
 populates the ignored `include/`, `libc/`, `libcxx/`, `libcxxabi/`, `libunwind/`
 and `libtsan/` directories from the Zig 0.17.1 source release:
 
@@ -21,7 +22,7 @@ The archive URL, SHA-256 and directory selection live in
 binds the installed directories to the archive and extraction recipe. Cached
 resources are reused without rehashing every extracted file. To check or repair
 interior edits, move all six generated directories and the receipt aside and run
-`make resources` again; the original archive is verified before extraction.
+`./build.sh resources` again; the original archive is verified before extraction.
 
 A failed acquisition leaves `.cache/resources-stage` for inspection. Only one
 acquisition may own that stage; after confirming no acquisition is active, move
